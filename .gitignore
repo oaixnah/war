@@ -1,0 +1,14 @@
+# Build output
+target/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.log
+
+# Editors and operating systems
+.idea/
+.DS_Store
+*.swp
+*.swo

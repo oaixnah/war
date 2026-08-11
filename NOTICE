@@ -1,0 +1,25 @@
+War
+Copyright (C) 2026 War contributors
+
+War is planned as a modified version of the Warp client:
+
+    Warp
+    Copyright (C) 2020-2026 Denver Technologies, Inc.
+    https://github.com/warpdotdev/warp
+
+At the selected upstream baseline, most Warp client code is licensed under the GNU Affero General
+Public License, version 3 only. The upstream `warpui_core` and `warpui` crates are licensed under the
+MIT License. The complete upstream license files and file-level notices will be retained unchanged
+when the source baseline is imported.
+
+War-specific client code is intended to be licensed under AGPL-3.0-only unless a source file or
+component explicitly states another compatible license. Distributed binaries must be accompanied by
+access to the complete corresponding source as required by the applicable license.
+
+The Warp name, logos, icons, and related branding are trademarks of their respective owners. Open
+source licenses do not grant trademark rights. War is an independent project and is not affiliated
+with, endorsed by, or sponsored by Denver Technologies, Inc. Upstream visual assets and application
+identifiers must be replaced before War binaries are distributed.
+
+OpenAI and other third-party names are trademarks of their respective owners. Their use describes
+protocol compatibility and does not imply endorsement.
