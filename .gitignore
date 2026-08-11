@@ -12,6 +12,12 @@ app/src/server/graphql/schema/generated
 crates/command-signatures-v2/js/build
 crates/command-signatures-v2/js/node_modules
 
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.log
+
 # For testing changes to the channel versions file
 channel_versions_test.json
 
@@ -38,6 +44,8 @@ script/windows/Output
 [._]s[a-rt-v][a-z]
 [._]ss[a-gi-z]
 [._]sw[a-p]
+*.swp
+*.swo
 
 # Don't include the PTY recording.
 warp.pty.recording
@@ -69,4 +77,3 @@ __pycache__/
 
 # Project notes
 .note/
-.claude/scheduled_tasks.lock
