@@ -1,13 +1,14 @@
 # Target Architecture
 
 **Status:** Accepted target architecture
-**Last reviewed:** 2026-08-11
+**Last reviewed:** 2026-08-12
 
 ## Current State
 
-The application source has not yet been imported. M1 will establish a fixed Warp baseline and produce
-an inventory of inherited modules and dependency violations. This document defines the target state;
-it does not claim that the imported source already satisfies these boundaries.
+The fixed Warp source baseline has been imported and inventoried in [`BASELINE.md`](BASELINE.md). The
+inherited client builds and launches, but still contains hosted authentication, Warp Server, GraphQL,
+Drive, telemetry, cloud agents, orchestration, editor, and LSP dependencies. This document defines the
+target state; the imported source does not yet satisfy these boundaries.
 
 ## Context
 
@@ -173,8 +174,8 @@ War is based on a recorded Warp commit and does not continuously merge Warp `mas
 remote remains available for inspection. Relevant terminal, rendering, shell, platform, and security
 fixes are cherry-picked individually.
 
-The current repository history will be tagged before M1 rebuilds `main` on the selected upstream
-commit. War documentation and changes will then be replayed as commits on top of that baseline.
+The pre-upstream repository history is preserved by the `pre-upstream-foundation` tag. War foundation
+documents were replayed as a commit on top of the selected baseline before `main` migration.
 
 ## Testing Boundaries
 

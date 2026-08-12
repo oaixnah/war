@@ -1,7 +1,7 @@
 War
 Copyright (C) 2026 War contributors
 
-War is planned as a modified version of the Warp client:
+War is a modified version of the Warp client:
 
     Warp
     Copyright (C) 2020-2026 Denver Technologies, Inc.
@@ -9,8 +9,7 @@ War is planned as a modified version of the Warp client:
 
 At the selected upstream baseline, most Warp client code is licensed under the GNU Affero General
 Public License, version 3 only. The upstream `warpui_core` and `warpui` crates are licensed under the
-MIT License. The complete upstream license files and file-level notices will be retained unchanged
-when the source baseline is imported.
+MIT License. The complete upstream license files and file-level notices are retained unchanged.
 
 War-specific client code is intended to be licensed under AGPL-3.0-only unless a source file or
 component explicitly states another compatible license. Distributed binaries must be accompanied by

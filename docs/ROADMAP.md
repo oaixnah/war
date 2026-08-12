@@ -2,7 +2,7 @@
 
 **Planning model:** Milestones with acceptance criteria
 **Active milestone:** M1 Upstream Baseline
-**Last reviewed:** 2026-08-11
+**Last reviewed:** 2026-08-12
 
 ## Operating Rules
 
@@ -63,6 +63,14 @@
 - Baseline failures are documented rather than hidden or patched without explanation.
 - No War product behavior is implemented in the baseline commit.
 - Rewriting remote `main` receives explicit confirmation immediately before push.
+
+### Evidence
+
+- The exact baseline, inventory, build results, runtime observations, and known failures are recorded in
+  [`BASELINE.md`](BASELINE.md).
+- The baseline builds, signs, and launches as `WarpOss.app`; skipping inherited login starts a local zsh
+  session.
+- M1 remains `Active` until the validated migration branch replaces `main` with explicit confirmation.
 
 ## M2 Local Terminal
 

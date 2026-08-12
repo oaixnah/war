@@ -9,17 +9,19 @@ Read these documents before making a non-trivial change:
 1. `docs/PRODUCT.md` defines what the product is and is not.
 2. Accepted records in `docs/decisions/` explain durable technical choices.
 3. `docs/ARCHITECTURE.md` defines target module boundaries and safety constraints.
-4. An accepted spec under `docs/specs/` defines the behavior of a scoped feature.
-5. `docs/ROADMAP.md` defines delivery order, not product truth.
-6. `DEVELOPMENT.md` defines the development workflow and quality gates.
+4. `docs/BASELINE.md` records the inherited implementation and known failures.
+5. An accepted spec under `docs/specs/` defines the behavior of a scoped feature.
+6. `docs/ROADMAP.md` defines delivery order, not product truth.
+7. `DEVELOPMENT.md` defines the development workflow and quality gates.
 
 If these documents conflict, stop and resolve the conflict in documentation rather than guessing.
 
 ## Current State
 
-War is entering M1. The Warp source tree has not been imported yet, so application build and test
-commands are not currently available. M1 must import and validate an exact upstream baseline before
-War product code is changed.
+War contains the fixed Warp baseline recorded in `docs/BASELINE.md`. It builds and launches, but still
+contains inherited Warp branding, onboarding, hosted services, telemetry, cloud product surfaces, and
+architecture violations. Do not treat inherited behavior as accepted War behavior. M1 must complete
+the approved `main` history migration before War product code changes begin.
 
 ## Product Invariants
 
@@ -60,8 +62,6 @@ violations; remove them in the relevant roadmap milestone.
 
 ## Code Standards
 
-These rules apply after the upstream source import:
-
 - Follow the repository Rust toolchain and Rust 2024 edition.
 - Run the repository formatter; do not hand-format around it.
 - Treat Clippy warnings as errors.
@@ -75,8 +75,8 @@ These rules apply after the upstream source import:
 
 ## Verification
 
-After M1, use the exact commands documented in `DEVELOPMENT.md`. A code change is not complete until
-formatting, linting, relevant automated tests, and applicable macOS manual verification pass.
+Use the exact commands documented in `DEVELOPMENT.md`. A code change is not complete until formatting,
+linting, relevant automated tests, and applicable macOS manual verification pass.
 
 Documentation-only changes must at least be checked for valid relative links, consistent terminology,
 and clean Markdown formatting.

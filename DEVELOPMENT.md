@@ -6,7 +6,7 @@ quality gates.
 
 ## Working Model
 
-- `main` is always expected to build and run once application source exists.
+- `main` is always expected to build and run.
 - One roadmap milestone may be `Active` at a time.
 - One primary vertical slice should be in progress at a time.
 - Code changes go through a pull request, even when authored and reviewed by the same maintainer.
@@ -74,19 +74,23 @@ A non-trivial implementation is ready to begin when:
 
 ## Verification Commands
 
-The exact baseline will be confirmed and recorded during M1. Until then, the expected upstream
-commands are:
+The imported baseline requires Git LFS objects and Yarn 4.0.1. Follow the clean-checkout setup and
+known workarounds in [`docs/BASELINE.md`](docs/BASELINE.md). The standard verification commands are:
 
 ```bash
-./script/bootstrap
+./script/bootstrap -y --skip-common-skills --skip-gcloud-auth
 ./script/format --check
-cargo clippy --workspace --all-targets --all-features --tests -- -D warnings
+./script/presubmit
 cargo nextest run --no-fail-fast --workspace --exclude command-signatures-v2
-./script/run
+cargo nextest run -p warp_completer --features v2
+cargo test --doc
+WARP_SKIP_COMMON_SKILLS_INSTALL=1 ./script/run
 ```
 
-After the source tree is simplified, these commands may be narrowed only if the replacement preserves
-equivalent coverage. `./script/presubmit` may be used when it matches the documented checks.
+`script/presubmit` already includes the two nextest commands and doc tests; they are listed separately
+to make individual failures reproducible. The imported workspace can generate more than 44 GiB of
+build output during complete testing, so start with at least 60 GiB free. After the source tree is
+simplified, these commands may be narrowed only if the replacement preserves equivalent coverage.
 
 ## Testing Strategy
 
@@ -121,7 +125,7 @@ A change is complete when:
 
 War tracks a fixed Warp baseline rather than continuously merging upstream.
 
-1. Record the baseline commit in `docs/BASELINE.md` during M1.
+1. Use the baseline commit recorded in `docs/BASELINE.md`.
 2. Fetch upstream changes without merging them into `main`.
 3. Select only relevant PTY, rendering, shell, platform, and security fixes.
 4. Cherry-pick fixes individually and run War's full verification.
