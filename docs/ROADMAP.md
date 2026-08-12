@@ -1,7 +1,7 @@
 # Roadmap
 
 **Planning model:** Milestones with acceptance criteria
-**Active milestone:** M1 Upstream Baseline
+**Active milestone:** M2 Local Terminal
 **Last reviewed:** 2026-08-12
 
 ## Operating Rules
@@ -18,8 +18,8 @@
 | Milestone | Status | Outcome |
 | --- | --- | --- |
 | M0 Foundation | Done | Repository rules, plans, templates, and legal intent are explicit |
-| M1 Upstream Baseline | Active | A reproducible, recorded Warp source baseline builds on macOS |
-| M2 Local Terminal | Planned | War is rebranded, account-free, offline, and independent of Warp services |
+| M1 Upstream Baseline | Done | A reproducible, recorded Warp source baseline builds on macOS |
+| M2 Local Terminal | Active | War is rebranded, account-free, offline, and independent of Warp services |
 | M3 Agent Core | Planned | A headless local agent runtime completes tool loops through OpenAI Responses |
 | M4 Native Timeline | Planned | Shell and agent interactions work safely in one terminal timeline |
 | M5 Simplification | Planned | Excluded product surfaces and dependencies are removed from the default build |
@@ -70,7 +70,8 @@
   [`BASELINE.md`](BASELINE.md).
 - The baseline builds, signs, and launches as `WarpOss.app`; skipping inherited login starts a local zsh
   session.
-- M1 remains `Active` until the validated migration branch replaces `main` with explicit confirmation.
+- The validated migration replaced remote `main` with explicit confirmation, and the pre-upstream
+  history is available at `pre-upstream-foundation`.
 
 ## M2 Local Terminal
 
