@@ -1481,6 +1481,10 @@ pub struct EditorOptions {
     /// Optional closure that allows parent views to add flags to the EditorView's keymap context.
     /// This is called during `keymap_context()` and can insert additional flags into the context.
     pub keymap_context_modifier: Option<KeymapContextModifierFn>,
+    /// Whether this editor participates in the hosted voice-input feature.
+    /// Local shell input disables this because voice input depends on account and AI settings.
+    #[cfg(feature = "voice_input")]
+    pub enable_voice_input: bool,
 }
 
 impl Default for EditorOptions {
@@ -1513,6 +1517,8 @@ impl Default for EditorOptions {
             drag_drop_path_transformer: None,
             is_password: false,
             keymap_context_modifier: None,
+            #[cfg(feature = "voice_input")]
+            enable_voice_input: true,
         }
     }
 }
@@ -1548,6 +1554,8 @@ impl From<SingleLineEditorOptions> for EditorOptions {
             drag_drop_path_transformer: None,
             is_password: options.is_password,
             keymap_context_modifier: None,
+            #[cfg(feature = "voice_input")]
+            enable_voice_input: true,
         }
     }
 }
@@ -1885,6 +1893,9 @@ pub struct EditorView {
     /// Options for voice transcription.
     #[cfg(feature = "voice_input")]
     voice_transcription_options: VoiceTranscriptionOptions,
+
+    #[cfg(feature = "voice_input")]
+    enable_voice_input: bool,
 
     /// The mouse handle for the voice transcription icon.
     #[cfg(feature = "voice_input")]
@@ -3053,7 +3064,7 @@ impl EditorView {
         );
 
         #[cfg(feature = "voice_input")]
-        {
+        if options.enable_voice_input {
             use crate::workspaces::user_workspaces::UserWorkspaces;
 
             ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, _handle, _event, ctx| {
@@ -3245,7 +3256,13 @@ impl EditorView {
             #[cfg(feature = "voice_input")]
             interaction_state_before_voice: None,
             #[cfg(feature = "voice_input")]
-            voice_transcription_options: Self::voice_options(ctx),
+            voice_transcription_options: if options.enable_voice_input {
+                Self::voice_options(ctx)
+            } else {
+                VoiceTranscriptionOptions::Disabled
+            },
+            #[cfg(feature = "voice_input")]
+            enable_voice_input: options.enable_voice_input,
             #[cfg(feature = "voice_input")]
             voice_new_feature_popup: Self::create_voice_new_feature_popup(ctx),
             is_ai_input: false,
@@ -5033,12 +5050,21 @@ impl EditorView {
     }
 
     fn voice_input_toggle_key_code(&self, ctx: &AppContext) -> Option<KeyCode> {
-        let ai_settings_handle = &AISettings::handle(ctx);
-        ai_settings_handle
-            .as_ref(ctx)
-            .voice_input_toggle_key
-            .value()
-            .to_key_code()
+        #[cfg(feature = "voice_input")]
+        {
+            if !self.enable_voice_input {
+                return None;
+            }
+            AISettings::as_ref(ctx)
+                .voice_input_toggle_key
+                .value()
+                .to_key_code()
+        }
+        #[cfg(not(feature = "voice_input"))]
+        {
+            let _ = ctx;
+            None
+        }
     }
 
     pub fn attach_files(&mut self, ctx: &mut ViewContext<Self>) {
@@ -8293,13 +8319,13 @@ impl EditorView {
         }
         let input_settings = InputSettings::as_ref(ctx);
         let is_universal_input_enabled = input_settings.is_universal_developer_input_enabled(ctx);
-        let is_any_ai_enabled = AISettings::as_ref(ctx).is_any_ai_enabled(ctx);
         let should_show_image = !FeatureFlag::AgentView.is_enabled()
             && self.image_context_options.should_show_button()
             && !is_universal_input_enabled;
-        let should_show_at_context_menu = !FeatureFlag::AgentView.is_enabled()
+        let should_show_at_context_menu = self.ai_context_menu_state.is_some()
+            && !FeatureFlag::AgentView.is_enabled()
             && !is_universal_input_enabled
-            && is_any_ai_enabled
+            && AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
             && {
                 if !self.is_ai_input {
                     // In terminal mode, check the setting

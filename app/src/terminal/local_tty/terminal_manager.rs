@@ -15,7 +15,8 @@ use nix::sys::termios::LocalFlags;
 use parking_lot::{FairMutex, Mutex};
 use pathfinder_geometry::vector::Vector2F;
 use settings::Setting as _;
-use warp_core::SessionId;
+use warp_core::channel::{Channel, ChannelState};
+use warp_core::{SessionId, safe_error};
 use warp_errors::report_error;
 use warpui::r#async::executor::Background;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, ViewHandle};
@@ -94,7 +95,9 @@ pub struct TerminalManager<S> {
     pty_controller: ModelHandle<PtyController>,
 
     /// The manager is responsible for managing the lifetime of the remote server controller.
-    remote_server_controller: ModelHandle<RemoteServerController>,
+    remote_server_controller: Option<ModelHandle<RemoteServerController>>,
+
+    policy: LocalPtyPolicy,
 
     /// The process ID of the PTY. Purely used for integration tests. None if the PTY has not yet
     /// been started.
@@ -164,6 +167,35 @@ struct ShellStartupResources {
     model_events: ModelHandle<ModelEventDispatcher>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalPtyPolicy {
+    enable_hosted_integrations: bool,
+    ssh_remote_server_support: SshRemoteServerSupport,
+}
+
+impl LocalPtyPolicy {
+    fn for_gui(channel: Channel, has_hosted_integrations: bool) -> Self {
+        if channel == Channel::Oss && !has_hosted_integrations {
+            Self {
+                enable_hosted_integrations: false,
+                ssh_remote_server_support: SshRemoteServerSupport::Disabled,
+            }
+        } else {
+            Self {
+                enable_hosted_integrations: true,
+                ssh_remote_server_support: SshRemoteServerSupport::Enabled,
+            }
+        }
+    }
+
+    fn for_tui() -> Self {
+        Self {
+            enable_hosted_integrations: true,
+            ssh_remote_server_support: SshRemoteServerSupport::Disabled,
+        }
+    }
+}
+
 /// Handles created for a local terminal manager and its surface.
 pub struct TerminalManagerInit<S> {
     pub manager: ModelHandle<Box<dyn TerminalManagerTrait>>,
@@ -225,7 +257,10 @@ impl<S> TerminalManager<S> {
             model_event_sender,
             chosen_shell,
             BlockSpacing::for_gui(ctx),
-            SshRemoteServerSupport::Enabled,
+            LocalPtyPolicy::for_gui(
+                ChannelState::channel(),
+                ctx.has_singleton_model::<ai::api_keys::ApiKeyManager>(),
+            ),
             ctx,
             create_surface,
             |manager| Box::new(manager),
@@ -266,7 +301,7 @@ impl<S> TerminalManager<S> {
             model_event_sender,
             chosen_shell,
             block_spacing,
-            SshRemoteServerSupport::Disabled,
+            LocalPtyPolicy::for_tui(),
             ctx,
             create_surface,
             |manager| Box::new(TuiTerminalManager(manager)),
@@ -285,7 +320,7 @@ impl<S> TerminalManager<S> {
         model_event_sender: Option<SyncSender<ModelEvent>>,
         chosen_shell: Option<AvailableShell>,
         block_spacing: BlockSpacing,
-        ssh_remote_server_support: SshRemoteServerSupport,
+        policy: LocalPtyPolicy,
         ctx: &mut AppContext,
         create_surface: impl FnOnce(
             TerminalSurfaceInit,
@@ -313,21 +348,29 @@ impl<S> TerminalManager<S> {
         let channel_event_proxy = ChannelEventListener::new(wakeups_tx, events_tx, pty_reads_tx);
 
         // Initialize the sessions model.
-        let sessions = ctx.add_model(|ctx| Sessions::new(executor_command_tx.clone(), ctx));
+        let sessions = ctx.add_model(|ctx| {
+            if policy.enable_hosted_integrations {
+                Sessions::new(executor_command_tx.clone(), ctx)
+            } else {
+                Sessions::new_without_ssh_remote_server(executor_command_tx.clone(), ctx)
+            }
+        });
 
         let model_events = ctx.add_model(|ctx| {
             ModelEventDispatcher::new_with_ssh_remote_server_support(
                 events_rx,
                 sessions.clone(),
-                ssh_remote_server_support,
+                policy.ssh_remote_server_support,
                 ctx,
             )
         });
 
         // Have ApiKeyManager subscribe to block completion events for AWS credential refresh
-        ai::api_keys::ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-            manager.register_model_event_dispatcher(&model_events, ctx);
-        });
+        if policy.enable_hosted_integrations {
+            ai::api_keys::ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                manager.register_model_event_dispatcher(&model_events, ctx);
+            });
+        }
 
         let preferred_shell = chosen_shell.unwrap_or_else(|| {
             AvailableShells::handle(ctx)
@@ -362,7 +405,7 @@ impl<S> TerminalManager<S> {
         let model = Arc::new(FairMutex::new(model));
 
         // This is purely for measuring throughput on WarpDev.
-        if FeatureFlag::RecordPtyThroughput.is_enabled() {
+        if policy.enable_hosted_integrations && FeatureFlag::RecordPtyThroughput.is_enabled() {
             let auth_state = AuthStateProvider::as_ref(ctx).get();
             recorder::record_pty_throughput(
                 inactive_pty_reads_rx.clone().activate(),
@@ -377,20 +420,21 @@ impl<S> TerminalManager<S> {
         // events can observe the correct pending status and source type.
         match is_shared_session_creator {
             IsSharedSessionCreator::Yes { source }
-                if FeatureFlag::CreatingSharedSessions.is_enabled() =>
+                if policy.enable_hosted_integrations
+                    && FeatureFlag::CreatingSharedSessions.is_enabled() =>
             {
                 model.lock().set_shared_session_status(
                     SharedSessionStatus::SharePendingPreBootstrap { source },
                 );
                 log::info!("Configured terminal to start sharing after bootstrap");
             }
-            IsSharedSessionCreator::Yes { .. } => {
+            IsSharedSessionCreator::Yes { .. } if policy.enable_hosted_integrations => {
                 log::warn!(
                     "Session sharing was requested, but CreatingSharedSessions is disabled; \
                      skipping shared-session startup"
                 );
             }
-            IsSharedSessionCreator::No => {}
+            IsSharedSessionCreator::Yes { .. } | IsSharedSessionCreator::No => {}
         }
 
         // Initialize the PtyController.
@@ -403,9 +447,9 @@ impl<S> TerminalManager<S> {
             ctx,
         );
 
-        // Initialize the RemoteServerController.
-        let remote_server_controller =
-            init_remote_server_controller(&pty_controller, &model_events, ctx);
+        let remote_server_controller = policy
+            .enable_hosted_integrations
+            .then(|| init_remote_server_controller(&pty_controller, &model_events, ctx));
         let size_info = model.lock().block_list().size().to_owned();
         let TerminalSurfaceResult { surface, post_wire } = create_surface(
             TerminalSurfaceInit {
@@ -436,6 +480,7 @@ impl<S> TerminalManager<S> {
             terminal_attributes_poller: None,
             pty_controller,
             remote_server_controller,
+            policy,
             #[cfg(feature = "integration_tests")]
             pid: None,
             inactive_pty_reads_rx,
@@ -500,7 +545,7 @@ impl<S> TerminalManager<S> {
     }
 
     /// Returns the remote server controller owned by this manager.
-    pub(super) fn remote_server_controller(&self) -> ModelHandle<RemoteServerController> {
+    pub(super) fn remote_server_controller(&self) -> Option<ModelHandle<RemoteServerController>> {
         self.remote_server_controller.clone()
     }
 
@@ -552,18 +597,26 @@ fn on_shell_determined<S: TerminalSurface>(
 
     log::debug!("Using shell starter source {shell_starter_source:?}");
     let bg_executor = ctx.background_executor();
-    let auth_state = AuthStateProvider::as_ref(ctx).get();
 
     let is_fallback_shell = matches!(
         shell_starter_source,
         Some(ShellStarterSource::Fallback { .. })
     );
-    let shell_starter = shell_starter_source
-        .map(|source| get_shell_starter_internal(source, bg_executor, auth_state));
+    let shell_starter = shell_starter_source.map(|source| {
+        let auth_state = manager
+            .policy
+            .enable_hosted_integrations
+            .then(|| AuthStateProvider::as_ref(ctx).get());
+        get_shell_starter_internal(source, bg_executor, auth_state.map(|state| state.as_ref()))
+    });
     let shell_starter = match shell_starter {
         Some(shell_starter) => shell_starter,
         None => {
-            report_error!("Could not compute fallback shell");
+            if manager.policy.enable_hosted_integrations {
+                report_error!("Could not compute fallback shell");
+            } else {
+                log::error!("Could not compute fallback shell");
+            }
             manager.view.update(ctx, |surface, ctx| {
                 surface.on_pty_spawn_failed(
                     anyhow::Error::msg("Could not find a fallback shell. If you have PowerShell or WSL installed, please file an issue."),
@@ -657,6 +710,7 @@ fn on_shell_determined<S: TerminalSurface>(
                 shell_starter,
                 env_vars,
                 model.clone(),
+                manager.policy.enable_hosted_integrations,
                 #[cfg(windows)]
                 event_loop_tx,
                 ctx,
@@ -664,7 +718,14 @@ fn on_shell_determined<S: TerminalSurface>(
         }) {
         Ok(pty) => pty,
         Err(err) => {
-            report_error!(&err);
+            if manager.policy.enable_hosted_integrations {
+                report_error!(&err);
+            } else {
+                safe_error!(
+                    safe: ("Failed to spawn local PTY"),
+                    full: ("Failed to spawn local PTY: {err:#}")
+                );
+            }
             manager.view.update(ctx, |surface, ctx| {
                 surface.on_pty_spawn_failed(err, ctx);
             });
@@ -760,6 +821,7 @@ impl<S> TerminalManager<S> {
         shell_starter: ShellStarter,
         env_vars: HashMap<OsString, OsString>,
         model: Arc<FairMutex<TerminalModel>>,
+        ssh_wrapper_support: bool,
         #[cfg(windows)] event_loop_tx: mio_channel::Sender<Message>,
         ctx: &mut AppContext,
     ) -> anyhow::Result<Pty> {
@@ -767,7 +829,8 @@ impl<S> TerminalManager<S> {
             .is_shell_debug_mode_enabled
             .value();
         let is_honor_ps1_enabled = *SessionSettings::as_ref(ctx).honor_ps1;
-        let is_crash_reporting_enabled = PrivacySettings::as_ref(ctx).is_crash_reporting_enabled;
+        let is_crash_reporting_enabled =
+            ssh_wrapper_support && PrivacySettings::as_ref(ctx).is_crash_reporting_enabled;
 
         // Determine whether the Node.js Version chip is enabled anywhere it could be
         // shown (the Warp prompt, the agent footer, or the CLI agent footer). When it
@@ -795,9 +858,10 @@ impl<S> TerminalManager<S> {
         // wrapper is active. The bootstrap scripts check `WARP_USE_SSH_WRAPPER` (derived
         // from this value) before invoking `warp_ssh_helper`, which spawns the ControlMaster
         // and opens agent-protocol channels.
-        let enable_ssh_wrapper = *WarpifySettings::as_ref(ctx)
-            .enable_ssh_warpification
-            .value();
+        let enable_ssh_wrapper = ssh_wrapper_support
+            && *WarpifySettings::as_ref(ctx)
+                .enable_ssh_warpification
+                .value();
 
         // Only meaningful when the legacy ControlMaster wrapper is active.
         let reuse_ssh_control_master = enable_ssh_wrapper
@@ -974,7 +1038,7 @@ pub fn get_shell_starter(
             get_shell_starter_internal(
                 starter_source,
                 ctx.background_executor().clone(),
-                auth_state,
+                Some(auth_state),
             )
         })
 }
@@ -982,7 +1046,7 @@ pub fn get_shell_starter(
 fn get_shell_starter_internal(
     shell_starter_source: ShellStarterSource,
     background_executor: Arc<Background>,
-    auth_state: &AuthState,
+    auth_state: Option<&AuthState>,
 ) -> ShellStarter {
     match shell_starter_source {
         ShellStarterSource::Override(shell_starter) => shell_starter,
@@ -993,7 +1057,7 @@ fn get_shell_starter_internal(
             unsupported_shell,
             starter,
         } => {
-            if let Some(unsupported_shell) = unsupported_shell {
+            if let (Some(unsupported_shell), Some(auth_state)) = (unsupported_shell, auth_state) {
                 send_telemetry_on_executor!(
                     auth_state,
                     TelemetryEvent::UnsupportedShell {
@@ -1007,6 +1071,10 @@ fn get_shell_starter_internal(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_manager_tests.rs"]
+mod tests;
 
 impl EventLoopSender for mio_channel::Sender<Message> {
     fn send(&self, message: Message) -> Result<(), EventLoopSendError> {

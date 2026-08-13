@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::SyncSender;
 
 use anyhow::Result;
 use cfg_if::cfg_if;
@@ -62,6 +61,7 @@ use crate::auth::web_handoff::{WebHandoffEvent, WebHandoffView};
 use crate::auth::{AuthStateProvider, LoginFailureReason};
 use crate::autoupdate::{AutoupdateState, AutoupdateStateEvent, RequestType, UpdateReady};
 use crate::changelog_model::ChangelogRequestType;
+use crate::channel::Channel;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{GenericStringObjectFormat, JsonObjectType, ObjectType};
 use crate::drive::export::ExportManager;
@@ -74,7 +74,6 @@ use crate::launch_configs::launch_config;
 use crate::linear::LinearIssueWork;
 use crate::notebooks::manager::NotebookSource;
 use crate::pane_group::{NewTerminalOptions, PanesLayout};
-use crate::persistence::ModelEvent;
 use crate::pricing::{PricingInfoModel, PricingInfoModelEvent};
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::experiments::ServerExperiments;
@@ -116,7 +115,7 @@ use crate::{
     send_telemetry_from_app_ctx, send_telemetry_from_ctx,
 };
 
-const WINDOW_TITLE: &str = "Warp";
+const WINDOW_TITLE: &str = "War";
 
 lazy_static! {
     static ref FALLBACK_WINDOW_SIZE: Vector2F = vec2f(800.0, 600.0);
@@ -798,6 +797,10 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
             let mut active_index = None;
             let mut normal_window_count = 0;
             for (idx, window) in app_state.windows.iter().enumerate() {
+                if ChannelState::channel() == Channel::Oss && !window.is_local_terminal_only() {
+                    continue;
+                }
+
                 // If this window is a quake window, hide it by default.
                 if window.quake_mode {
                     // If this is Windows, skip restoring the quake window. Creating a hidden window
@@ -818,7 +821,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         AddWindowOptions {
                             window_style: WindowStyle::Pin,
                             window_bounds: WindowBounds::ExactPosition(frame_args.window_bounds),
-                            title: Some("Warp".to_owned()),
+                            title: Some("War".to_owned()),
                             fullscreen_state: window.fullscreen_state,
                             background_blur_radius_pixels,
                             background_blur_texture,
@@ -861,7 +864,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                         ctx.add_window(
                             AddWindowOptions {
                                 window_bounds: WindowBounds::new(window.bounds),
-                                title: Some("Warp".to_owned()),
+                                title: Some("War".to_owned()),
                                 fullscreen_state: window.fullscreen_state,
                                 background_blur_radius_pixels,
                                 background_blur_texture,
@@ -913,7 +916,7 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
                 ctx.add_window(
                     AddWindowOptions {
                         window_bounds: WindowBounds::new(window.bounds),
-                        title: Some("Warp".to_owned()),
+                        title: Some("War".to_owned()),
                         fullscreen_state: window.fullscreen_state,
                         background_blur_radius_pixels,
                         background_blur_texture,
@@ -1313,7 +1316,7 @@ fn default_window_options(window_settings: &WindowSettings, ctx: &AppContext) ->
     AddWindowOptions {
         window_style,
         window_bounds: next_bounds,
-        title: Some("Warp".to_owned()),
+        title: Some("War".to_owned()),
         background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
         background_blur_texture: *window_settings.background_blur_texture,
         on_gpu_driver_selected: on_gpu_driver_selected_callback(),
@@ -1498,7 +1501,7 @@ fn toggle_quake_mode_window(global_resource_handles: &GlobalResourceHandles, ctx
                 AddWindowOptions {
                     window_style: WindowStyle::Pin,
                     window_bounds: WindowBounds::ExactPosition(config.window_bounds),
-                    title: Some("Warp".to_owned()),
+                    title: Some("War".to_owned()),
                     background_blur_radius_pixels: Some(*window_settings.background_blur_radius),
                     background_blur_texture: *window_settings.background_blur_texture,
                     // Ignore the quake window for positioning the next window
@@ -1850,6 +1853,13 @@ enum AuthOnboardingState {
 }
 
 pub struct RootView {
+    local_workspace: Option<ViewHandle<Workspace>>,
+    hosted: Option<Box<HostedRootState>>,
+    mouse_states: TrafficLightMouseStates,
+    window_id: WindowId,
+}
+
+pub struct HostedRootState {
     auth_onboarding_state: AuthOnboardingState,
     server_time: Option<Arc<ServerTime>>,
     auth_view: ViewHandle<AuthView>,
@@ -1857,14 +1867,7 @@ pub struct RootView {
     needs_sso_link_view: ViewHandle<NeedsSsoLinkView>,
     #[cfg(target_family = "wasm")]
     web_handoff_view: ViewHandle<WebHandoffView>,
-    pub server_api: Arc<ServerApi>,
-    pub model_event_sender: Option<SyncSender<ModelEvent>>,
-    mouse_states: TrafficLightMouseStates,
-    /// The window ID is needed because the "maximize" button needs to change its icon based on
-    /// whether or not the current window is maximized. Ideally the window ID could just be fetched
-    /// in the [`Self::render`] method, but there is no [`ViewContext`] available there. So, we
-    /// need to store it in a field instead.
-    window_id: WindowId,
+    server_api: Arc<ServerApi>,
     /// Stores the tutorial from onboarding when the user needs to log in before
     /// the guided tour can start. Consumed after auth completes.
     pending_tutorial: Option<OnboardingTutorial>,
@@ -1877,12 +1880,44 @@ pub struct RootView {
     paste_auth_token_modal: Option<ViewHandle<PasteAuthTokenModalView>>,
 }
 
+impl std::ops::Deref for RootView {
+    type Target = HostedRootState;
+
+    fn deref(&self) -> &Self::Target {
+        self.hosted
+            .as_deref()
+            .expect("hosted root state is unavailable on the OSS local path")
+    }
+}
+
+impl std::ops::DerefMut for RootView {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.hosted
+            .as_deref_mut()
+            .expect("hosted root state is unavailable on the OSS local path")
+    }
+}
+
 impl RootView {
     pub fn new(
         global_resource_handles: GlobalResourceHandles,
         workspace_setting: NewWorkspaceSource,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
+        if is_native_oss(ChannelState::channel(), cfg!(target_family = "wasm"))
+            && !ctx.has_singleton_model::<ServerApiProvider>()
+        {
+            let workspace = ctx.add_typed_action_view(|ctx| {
+                Workspace::new_local(global_resource_handles, workspace_setting, ctx)
+            });
+            return Self {
+                local_workspace: Some(workspace),
+                hosted: None,
+                mouse_states: Default::default(),
+                window_id: ctx.window_id(),
+            };
+        }
+
         let window_id = ctx.window_id();
         let team_uid = workspace_setting.team_uid(ctx);
         UserWorkspaces::handle(ctx).update(ctx, |user_workspaces, ctx| {
@@ -1915,14 +1950,17 @@ impl RootView {
             me.handle_auth_override_warning_modal_event(event, ctx);
         });
 
-        let model_event_sender = global_resource_handles.model_event_sender.clone();
         let workspace_args = WorkspaceArgs {
             global_resource_handles,
             server_time: None,
             workspace_setting,
         };
 
-        let auth_onboarding_state = if auth_state.is_logged_in() {
+        let auth_onboarding_state = if should_open_terminal_directly(
+            ChannelState::channel(),
+            cfg!(target_family = "wasm"),
+            auth_state.is_logged_in(),
+        ) {
             AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
         } else {
             cfg_if! {
@@ -1972,7 +2010,7 @@ impl RootView {
             view
         };
 
-        let root_view = Self {
+        let hosted = HostedRootState {
             auth_onboarding_state,
             server_time: None,
             auth_view,
@@ -1981,9 +2019,6 @@ impl RootView {
             #[cfg(target_family = "wasm")]
             web_handoff_view,
             server_api: server_api.clone(),
-            model_event_sender,
-            mouse_states: Default::default(),
-            window_id: ctx.window_id(),
             pending_tutorial: None,
             pending_post_auth_onboarding_settings: None,
             pending_account_first_settings_class: None,
@@ -1992,9 +2027,18 @@ impl RootView {
             account_first_refresh_in_flight: false,
             paste_auth_token_modal: None,
         };
+        let root_view = Self {
+            local_workspace: None,
+            hosted: Some(Box::new(hosted)),
+            mouse_states: Default::default(),
+            window_id: ctx.window_id(),
+        };
 
         match &root_view.auth_onboarding_state {
-            AuthOnboardingState::Terminal(workspace) if FeatureFlag::Changelog.is_enabled() => {
+            AuthOnboardingState::Terminal(workspace)
+                if ChannelState::channel() != Channel::Oss
+                    && FeatureFlag::Changelog.is_enabled() =>
+            {
                 // Only show the changelog if we aren't about to launch the authentication flow
                 workspace.update(ctx, |workspace, ctx| {
                     workspace.check_for_changelog(ChangelogRequestType::WindowLaunch, ctx);
@@ -2059,7 +2103,9 @@ impl RootView {
         // For users who bypass onboarding (already logged in, or onboarding flags not active),
         // start autoupdate polling immediately. For new users in onboarding, this is a no-op;
         // polling will be started once onboarding completes.
-        root_view.start_autoupdate_polling(ctx);
+        if ChannelState::channel() != Channel::Oss {
+            root_view.start_autoupdate_polling(ctx);
+        }
 
         root_view
     }
@@ -2075,6 +2121,9 @@ impl RootView {
 
     /// Used for integration tests.
     pub fn workspace_view(&self) -> Option<&ViewHandle<Workspace>> {
+        if let Some(workspace) = &self.local_workspace {
+            return Some(workspace);
+        }
         match &self.auth_onboarding_state {
             AuthOnboardingState::Terminal(workspace) => Some(workspace),
             _ => None,
@@ -2661,10 +2710,11 @@ impl RootView {
                 {
                     let onboarding_view = onboarding_view.clone();
                     let account_class = *account_class;
+                    let hosted = self.hosted.as_deref_mut().expect("hosted state");
                     refresh_pending_onboarding_choices(
                         selected_settings,
-                        &mut self.pending_post_auth_onboarding_settings,
-                        &mut self.pending_tutorial,
+                        &mut hosted.pending_post_auth_onboarding_settings,
+                        &mut hosted.pending_tutorial,
                     );
                     let variant = offer_variant_for_account_class(account_class)
                         .expect("free account classes have an offer");
@@ -2705,10 +2755,11 @@ impl RootView {
                     requires_post_onboarding_login(is_logged_in, ai_enabled, warp_drive_enabled);
 
                 if requires_login {
+                    let hosted = self.hosted.as_deref_mut().expect("hosted state");
                     refresh_pending_onboarding_choices(
                         selected_settings,
-                        &mut self.pending_post_auth_onboarding_settings,
-                        &mut self.pending_tutorial,
+                        &mut hosted.pending_post_auth_onboarding_settings,
+                        &mut hosted.pending_tutorial,
                     );
 
                     let appearance = Appearance::as_ref(ctx);
@@ -3818,6 +3869,11 @@ impl RootView {
     }
 
     pub fn focus(&mut self, ctx: &mut ViewContext<Self>) -> bool {
+        if let Some(workspace) = &self.local_workspace {
+            ctx.focus(workspace);
+            ctx.notify();
+            return true;
+        }
         if let Some(modal) = &self.paste_auth_token_modal {
             ctx.focus(modal);
             ctx.notify();
@@ -3979,6 +4035,9 @@ impl RootView {
     }
 
     fn traffic_light_data(&self, ctx: &AppContext) -> Option<TrafficLightData> {
+        if self.local_workspace.is_some() {
+            return traffic_light_data(ctx, self.window_id);
+        }
         // The workspace view will handle rendering of the traffic lights (so
         // that they can be hidden when the tab bar is hidden).
         if matches!(self.auth_onboarding_state, AuthOnboardingState::Terminal(_)) {
@@ -3987,6 +4046,14 @@ impl RootView {
 
         traffic_light_data(ctx, self.window_id)
     }
+}
+
+fn is_native_oss(channel: Channel, is_wasm: bool) -> bool {
+    channel == Channel::Oss && !is_wasm
+}
+
+fn should_open_terminal_directly(channel: Channel, is_wasm: bool, is_logged_in: bool) -> bool {
+    is_native_oss(channel, is_wasm) || is_logged_in
 }
 
 #[derive(Clone, Debug)]
@@ -4004,6 +4071,12 @@ impl View for RootView {
     }
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
+        if self.local_workspace.is_some() {
+            if focus_ctx.is_self_focused() {
+                self.focus(ctx);
+            }
+            return;
+        }
         if focus_ctx.is_self_focused() {
             self.focus(ctx);
         } else if self.paste_auth_token_modal.is_some() {
@@ -4029,32 +4102,40 @@ impl View for RootView {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        let child = match &self.auth_onboarding_state {
-            AuthOnboardingState::Auth(_) => ChildView::new(&self.auth_view).finish(),
-            AuthOnboardingState::ConfirmIncomingAuth(_) => {
-                ChildView::new(&self.auth_override_view).finish()
+        let child = if let Some(workspace) = &self.local_workspace {
+            ChildView::new(workspace).finish()
+        } else {
+            match &self.auth_onboarding_state {
+                AuthOnboardingState::Auth(_) => ChildView::new(&self.auth_view).finish(),
+                AuthOnboardingState::ConfirmIncomingAuth(_) => {
+                    ChildView::new(&self.auth_override_view).finish()
+                }
+                #[cfg(target_family = "wasm")]
+                AuthOnboardingState::WebImport(_) => {
+                    ChildView::new(&self.web_handoff_view).finish()
+                }
+                AuthOnboardingState::NeedsSsoLink { .. } => {
+                    ChildView::new(&self.needs_sso_link_view).finish()
+                }
+                AuthOnboardingState::Onboarding {
+                    onboarding_view, ..
+                } => ChildView::new(onboarding_view).finish(),
+                AuthOnboardingState::PostAuthOnboarding {
+                    onboarding_view, ..
+                } => ChildView::new(onboarding_view).finish(),
+                AuthOnboardingState::LoginSlide {
+                    login_slide_view, ..
+                } => ChildView::new(login_slide_view).finish(),
+                AuthOnboardingState::Terminal(workspace) => ChildView::new(workspace).finish(),
             }
-            #[cfg(target_family = "wasm")]
-            AuthOnboardingState::WebImport(_) => ChildView::new(&self.web_handoff_view).finish(),
-            AuthOnboardingState::NeedsSsoLink { .. } => {
-                ChildView::new(&self.needs_sso_link_view).finish()
-            }
-            AuthOnboardingState::Onboarding {
-                onboarding_view, ..
-            } => ChildView::new(onboarding_view).finish(),
-            AuthOnboardingState::PostAuthOnboarding {
-                onboarding_view, ..
-            } => ChildView::new(onboarding_view).finish(),
-            AuthOnboardingState::LoginSlide {
-                login_slide_view, ..
-            } => ChildView::new(login_slide_view).finish(),
-            AuthOnboardingState::Terminal(workspace) => ChildView::new(workspace).finish(),
         };
 
         let mut stack = Stack::new();
         stack.add_child(child);
 
-        if let Some(modal) = &self.paste_auth_token_modal {
+        if self.local_workspace.is_none()
+            && let Some(modal) = &self.paste_auth_token_modal
+        {
             stack.add_child(ChildView::new(modal).finish());
         }
 
@@ -4119,6 +4200,11 @@ pub enum RootViewAction {
 impl TypedActionView for RootView {
     type Action = RootViewAction;
     fn handle_action(&mut self, action: &RootViewAction, ctx: &mut ViewContext<Self>) {
+        if self.local_workspace.is_some()
+            && matches!(action, RootViewAction::DebugEnterOnboardingState)
+        {
+            return;
+        }
         match action {
             RootViewAction::ToggleQuakeModeWindow => {
                 let global_resource_handles =

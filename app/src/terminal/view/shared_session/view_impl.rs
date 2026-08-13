@@ -194,7 +194,12 @@ impl TerminalView {
         task_id: AmbientAgentTaskId,
         ctx: &AppContext,
     ) -> bool {
-        let Some(current_user_uid) = self.auth_state.user_id().map(|uid| uid.as_string()) else {
+        let Some(current_user_uid) = self
+            .auth_state
+            .as_ref()
+            .and_then(|auth_state| auth_state.user_id())
+            .map(|uid| uid.as_string())
+        else {
             return false;
         };
 

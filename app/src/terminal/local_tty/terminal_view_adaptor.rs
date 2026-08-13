@@ -19,6 +19,7 @@ use session_sharing_protocol::sharer::{
     QuotaType, RemoveGuestResponse, SessionEndedReason, SessionSourceType,
     TeamAccessLevelUpdateResponse, UpdatePendingUserRoleResponse,
 };
+use warp_core::channel::{Channel, ChannelState};
 use warp_core::execution_mode::AppExecutionMode;
 use warp_core::send_telemetry_from_ctx;
 use warp_errors::report_error;
@@ -150,6 +151,7 @@ pub(crate) fn create_terminal_view_surface(
         should_use_live_appearance,
         has_restored_command_blocks,
     } = config;
+    let enable_hosted_integrations = resources.server_api.is_some();
     let current_prompt = ctx.add_model(|ctx| {
         CurrentPrompt::new_with_model_events(sessions.clone(), Some(&model_events), ctx)
     });
@@ -211,22 +213,22 @@ pub(crate) fn create_terminal_view_surface(
                 });
             }
 
-            wire_up_remote_server_controller_with_view(
-                &terminal_manager.remote_server_controller(),
-                view,
-                ctx,
-            );
+            if let Some(remote_server_controller) = terminal_manager.remote_server_controller() {
+                wire_up_remote_server_controller_with_view(&remote_server_controller, view, ctx);
+            }
 
             // Wire up TerminalView-specific session sharing (sharer setup, prompt/presence/LLM/
             // input-mode/conversation broadcasts, agent-view registration, network status).
-            terminal_manager.session_sharer = wire_up_terminal_view_session_sharing(
-                view,
-                current_prompt,
-                prompt_type,
-                terminal_manager.model(),
-                window_id,
-                ctx,
-            );
+            if enable_hosted_integrations {
+                terminal_manager.session_sharer = wire_up_terminal_view_session_sharing(
+                    view,
+                    current_prompt,
+                    prompt_type,
+                    terminal_manager.model(),
+                    window_id,
+                    ctx,
+                );
+            }
         },
     }
 }
@@ -413,13 +415,15 @@ fn wire_up_terminal_view_session_sharing(
                             ctx,
                         );
                     }
-                    send_telemetry_from_ctx!(
-                        TelemetryEvent::AgentViewExited {
-                            origin: TelemetryAgentViewEntryOrigin::from(origin.clone()),
-                            was_empty: *final_exchange_count == 0,
-                        },
-                        ctx
-                    );
+                    if ChannelState::channel() != Channel::Oss {
+                        send_telemetry_from_ctx!(
+                            TelemetryEvent::AgentViewExited {
+                                origin: TelemetryAgentViewEntryOrigin::from(origin.clone()),
+                                was_empty: *final_exchange_count == 0,
+                            },
+                            ctx
+                        );
+                    }
                 }
                 AgentViewControllerEvent::ExitConfirmed { .. } => {}
             },

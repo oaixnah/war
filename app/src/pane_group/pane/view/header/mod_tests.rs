@@ -6,16 +6,19 @@ use warpui::elements::Empty;
 use warpui::platform::WindowStyle;
 use warpui::{App, AppContext, Element, Entity, TypedActionView, View, ViewContext};
 
-use super::{Event, OpenOverlay};
+use super::{Event, OpenOverlay, PaneHeaderAction};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::CloudModel;
+use crate::drive::sharing::ShareableObject;
 use crate::menu::MenuItemFields;
 use crate::pane_group::focus_state::PaneFocusHandle;
 use crate::pane_group::{BackingView, PaneConfiguration, PaneId, PaneView};
+use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
+use crate::server::telemetry::SharingDialogSource;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::terminal::shared_session::permissions_manager::SessionPermissionsManager;
 use crate::test_util::settings::initialize_settings_for_tests;
@@ -196,6 +199,44 @@ fn test_handle_close() {
 
         pane_view.read(&app, |view, ctx| {
             assert!(view.child(ctx).as_ref(ctx).close_invoked);
+        });
+    })
+}
+
+#[test]
+fn test_disabled_header_has_no_sharing_ui() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let (_, pane_view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            let test_view = ctx.add_typed_action_view(|_| TestView::new());
+            let pane_config = ctx.add_model(|_| PaneConfiguration::new("Test"));
+            PaneView::new(PaneId::dummy_pane_id(), test_view, (), pane_config, ctx)
+        });
+
+        let header = pane_view.read(&app, |pane, _ctx| pane.header().to_owned());
+        header.update(&mut app, |header, ctx| {
+            header.set_sharing_enabled(false, ctx);
+        });
+        header.read(&app, |header, _ctx| {
+            assert!(header.sharing_dialog().is_none());
+        });
+
+        header.update(&mut app, |header, ctx| {
+            header.set_shareable_object(
+                Some(ShareableObject::WarpDriveObject(ServerId::default())),
+                ctx,
+            );
+            header.handle_action(
+                &PaneHeaderAction::<TestViewAction, TestViewAction>::ShareContents,
+                ctx,
+            );
+            header.open_shared_session_qr_code(SharingDialogSource::PaneHeader, ctx);
+            header.refresh_shared_session_link(ctx);
+
+            assert_eq!(header.open_overlay, OpenOverlay::None);
+            assert!(header.sharing_dialog().is_none());
+            assert!(!header.has_shareable_object(ctx));
         });
     })
 }

@@ -25,7 +25,8 @@ const UNSHARABLE_CONVERSATION_TOOLTIP: &str = "This conversation cannot be share
 
 /// Pane header component for sharing the pane contents.
 pub struct SharedPaneContent {
-    sharing_dialog: ViewHandle<SharingDialog>,
+    enabled: bool,
+    sharing_dialog: Option<ViewHandle<SharingDialog>>,
 
     /// Mouse state handle for the primary sharing action.
     /// * If the object is view-only, this is a "copy link" button
@@ -37,13 +38,10 @@ pub struct SharedPaneContent {
 }
 
 impl SharedPaneContent {
-    pub fn new<P: BackingView>(ctx: &mut ViewContext<PaneHeader<P>>) -> Self {
-        let sharing_dialog = ctx.add_typed_action_view(|ctx| SharingDialog::new(None, ctx));
-        ctx.subscribe_to_view(&sharing_dialog, move |me, _, event, ctx| {
-            me.handle_sharing_dialog_event(event, ctx);
-        });
+    pub fn new<P: BackingView>(_ctx: &mut ViewContext<PaneHeader<P>>) -> Self {
         Self {
-            sharing_dialog,
+            enabled: true,
+            sharing_dialog: None,
             primary_button_handle: Default::default(),
             view_only_icon_handle: Default::default(),
         }
@@ -51,28 +49,62 @@ impl SharedPaneContent {
 }
 
 impl<P: BackingView> PaneHeader<P> {
+    pub(in crate::pane_group) fn set_sharing_enabled(
+        &mut self,
+        enabled: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.shared_content.enabled = enabled;
+        if enabled && self.shared_content.sharing_dialog.is_none() {
+            let sharing_dialog = ctx.add_typed_action_view(|ctx| SharingDialog::new(None, ctx));
+            ctx.subscribe_to_view(&sharing_dialog, move |me, _, event, ctx| {
+                me.handle_sharing_dialog_event(event, ctx);
+            });
+            self.shared_content.sharing_dialog = Some(sharing_dialog);
+        } else if !enabled {
+            if let Some(sharing_dialog) = self.shared_content.sharing_dialog.take() {
+                ctx.unsubscribe_to_view(&sharing_dialog);
+            }
+            self.open_overlay = OpenOverlay::None;
+        }
+        ctx.notify();
+    }
+
     pub fn set_shareable_object(
         &mut self,
         shareable_object: Option<ShareableObject>,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.sharing_dialog().update(ctx, |dialog, ctx| {
+        if !self.shared_content.enabled {
+            return;
+        }
+        if self.shared_content.sharing_dialog.is_none() && shareable_object.is_some() {
+            let sharing_dialog = ctx.add_typed_action_view(|ctx| SharingDialog::new(None, ctx));
+            ctx.subscribe_to_view(&sharing_dialog, move |me, _, event, ctx| {
+                me.handle_sharing_dialog_event(event, ctx);
+            });
+            self.shared_content.sharing_dialog = Some(sharing_dialog);
+        }
+        let Some(sharing_dialog) = self.sharing_dialog() else {
+            return;
+        };
+        sharing_dialog.update(ctx, |dialog, ctx| {
             dialog.set_target(shareable_object, ctx);
         })
     }
 
-    pub fn sharing_dialog(&self) -> &ViewHandle<SharingDialog> {
-        &self.shared_content.sharing_dialog
+    pub fn sharing_dialog(&self) -> Option<&ViewHandle<SharingDialog>> {
+        self.shared_content.sharing_dialog.as_ref()
     }
 
     pub fn has_shareable_object<C: warpui::ViewAsRef>(&self, ctx: &C) -> bool {
-        self.sharing_dialog().as_ref(ctx).has_target()
+        self.sharing_dialog()
+            .is_some_and(|dialog| dialog.as_ref(ctx).has_target())
     }
 
     pub fn has_shareable_shared_session<C: warpui::ViewAsRef>(&self, ctx: &C) -> bool {
         self.sharing_dialog()
-            .as_ref(ctx)
-            .has_shared_session_target()
+            .is_some_and(|dialog| dialog.as_ref(ctx).has_shared_session_target())
     }
 
     pub fn is_sharing_dialog_enabled<C: warpui::ViewAsRef>(&self, ctx: &C) -> bool {
@@ -96,15 +128,12 @@ impl<P: BackingView> PaneHeader<P> {
         if !self.is_sharing_dialog_enabled(ctx) {
             return;
         }
+        let Some(sharing_dialog) = self.sharing_dialog().cloned() else {
+            return;
+        };
 
-        if !self
-            .sharing_dialog()
-            .as_ref(ctx)
-            .editability(ctx)
-            .can_edit()
-        {
-            self.sharing_dialog()
-                .update(ctx, |dialog, ctx| dialog.copy_link(ctx));
+        if !sharing_dialog.as_ref(ctx).editability(ctx).can_edit() {
+            sharing_dialog.update(ctx, |dialog, ctx| dialog.copy_link(ctx));
             return;
         }
 
@@ -112,7 +141,7 @@ impl<P: BackingView> PaneHeader<P> {
             OpenOverlay::OverflowMenu => {
                 self.open_overlay = OpenOverlay::SharingDialog;
                 ctx.emit(Event::PaneHeaderOverflowMenuToggled(false));
-                ctx.focus(&self.shared_content.sharing_dialog);
+                ctx.focus(&sharing_dialog);
                 true
             }
             OpenOverlay::SharingDialog => {
@@ -121,14 +150,13 @@ impl<P: BackingView> PaneHeader<P> {
             }
             OpenOverlay::None => {
                 self.open_overlay = OpenOverlay::SharingDialog;
-                ctx.focus(&self.shared_content.sharing_dialog);
+                ctx.focus(&sharing_dialog);
                 true
             }
         };
 
         if dialog_opened {
-            self.sharing_dialog()
-                .update(ctx, |dialog, ctx| dialog.report_open(source, ctx));
+            sharing_dialog.update(ctx, |dialog, ctx| dialog.report_open(source, ctx));
         }
 
         ctx.notify();
@@ -139,12 +167,13 @@ impl<P: BackingView> PaneHeader<P> {
         source: SharingDialogSource,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !self.is_sharing_dialog_enabled(ctx)
-            || !self
-                .sharing_dialog()
-                .as_ref(ctx)
-                .has_shared_session_link(ctx)
-        {
+        if !self.is_sharing_dialog_enabled(ctx) {
+            return;
+        }
+        let Some(sharing_dialog) = self.sharing_dialog().cloned() else {
+            return;
+        };
+        if !sharing_dialog.as_ref(ctx).has_shared_session_link(ctx) {
             return;
         }
 
@@ -153,8 +182,8 @@ impl<P: BackingView> PaneHeader<P> {
             ctx.emit(Event::PaneHeaderOverflowMenuToggled(false));
         }
         self.open_overlay = OpenOverlay::SharingDialog;
-        ctx.focus(&self.shared_content.sharing_dialog);
-        self.sharing_dialog().update(ctx, |dialog, ctx| {
+        ctx.focus(&sharing_dialog);
+        sharing_dialog.update(ctx, |dialog, ctx| {
             dialog.show_qr_code(ctx);
             if dialog_was_closed {
                 dialog.report_open(source, ctx);
@@ -164,7 +193,10 @@ impl<P: BackingView> PaneHeader<P> {
     }
 
     pub fn refresh_shared_session_link(&mut self, ctx: &mut ViewContext<Self>) {
-        self.sharing_dialog().update(ctx, |dialog, ctx| {
+        let Some(sharing_dialog) = self.sharing_dialog() else {
+            return;
+        };
+        sharing_dialog.update(ctx, |dialog, ctx| {
             dialog.refresh_shared_session_link(ctx);
         });
     }
@@ -194,12 +226,12 @@ impl<P: BackingView> PaneHeader<P> {
         if !self.is_sharing_dialog_enabled(app) {
             return;
         }
+        let Some(sharing_dialog) = self.sharing_dialog() else {
+            return;
+        };
 
-        let is_unsharable_conversation = self
-            .sharing_dialog()
-            .as_ref(app)
-            .is_unsharable_conversation(app);
-        let editability = self.sharing_dialog().as_ref(app).editability(app);
+        let is_unsharable_conversation = sharing_dialog.as_ref(app).is_unsharable_conversation(app);
+        let editability = sharing_dialog.as_ref(app).editability(app);
 
         let (primary_button_icon, primary_button_active, primary_tooltip_text) =
             if is_unsharable_conversation {

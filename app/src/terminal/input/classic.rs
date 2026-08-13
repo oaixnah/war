@@ -1,9 +1,9 @@
 use pathfinder_geometry::vector::vec2f;
 use settings::Setting;
 use warpui::elements::{
-    Border, ChildAnchor, ChildView, Clipped, Container, DropTarget, Element, Empty, Flex,
-    Hoverable, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, SavePosition,
-    Stack,
+    Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, DispatchEventResult,
+    DropTarget, Element, Empty, EventHandler, Flex, Hoverable, OffsetPositioning, ParentAnchor,
+    ParentElement, ParentOffsetBounds, SavePosition, Stack, Text,
 };
 use warpui::{AppContext, SingletonEntity};
 
@@ -30,6 +30,10 @@ impl Input {
     /// OR if `FeatureFlag::AgentView` is disabled and the user has 'Classic' input type selected
     /// in settings.
     pub(super) fn render_classic_input(&self, app: &AppContext) -> Box<dyn Element> {
+        if self.hosted_ui.is_none() {
+            return self.render_local_shell_input(app);
+        }
+
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
         let menu_positioning = self.menu_positioning(app);
@@ -113,7 +117,8 @@ impl Input {
 
         let ai_input_model = self.ai_input_model.as_ref(app);
 
-        if FeatureFlag::ImageAsContext.is_enabled()
+        if self.hosted_ui.is_some()
+            && FeatureFlag::ImageAsContext.is_enabled()
             && matches!(ai_input_model.input_type(), InputType::AI)
             && !FeatureFlag::AgentView.is_enabled()
             && let Some(images) = self.render_attachment_chips(appearance)
@@ -127,7 +132,7 @@ impl Input {
 
         column.add_child(self.render_input_box(show_vim_status, appearance, app));
 
-        if should_show_terminal_input_message_bar(&model, app) {
+        if self.hosted_ui.is_some() && should_show_terminal_input_message_bar(&model, app) {
             column.add_child(
                 Clipped::new(ChildView::new(&self.terminal_input_message_bar).finish()).finish(),
             );
@@ -298,7 +303,10 @@ impl Input {
                 column.add_children(
                     [
                         if is_model_selector {
-                            Some(ChildView::new(&self.inline_model_selector_view).finish())
+                            Some(
+                                ChildView::new(&self.hosted_ui().inline_model_selector_view)
+                                    .finish(),
+                            )
                         } else if is_slash_commands {
                             Some(ChildView::new(&self.inline_slash_commands_view).finish())
                         } else if is_prompts_menu {
@@ -327,7 +335,10 @@ impl Input {
                         Some(input),
                         Some(ChildView::new(&self.agent_status_view).finish()),
                         if is_model_selector {
-                            Some(ChildView::new(&self.inline_model_selector_view).finish())
+                            Some(
+                                ChildView::new(&self.hosted_ui().inline_model_selector_view)
+                                    .finish(),
+                            )
                         } else if is_slash_commands {
                             Some(ChildView::new(&self.inline_slash_commands_view).finish())
                         } else if is_prompts_menu {
@@ -374,7 +385,9 @@ impl Input {
                 column.add_children([ChildView::new(&self.agent_status_view).finish(), input]);
 
                 if is_model_selector && should_render_below {
-                    column.add_child(ChildView::new(&self.inline_model_selector_view).finish());
+                    column.add_child(
+                        ChildView::new(&self.hosted_ui().inline_model_selector_view).finish(),
+                    );
                 } else if is_slash_commands && should_render_below {
                     column.add_child(ChildView::new(&self.inline_slash_commands_view).finish());
                 } else if is_prompts_menu && should_render_below {
@@ -395,5 +408,67 @@ impl Input {
         }
 
         SavePosition::new(column.finish(), &self.save_position_id()).finish()
+    }
+
+    fn render_local_shell_input(&self, app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let editor_height = self.size_info(app).pane_height_px().as_f32() / 2.;
+        let prompt = self.prompt_type.as_ref(app).prompt_as_string(app);
+
+        let editor = SavePosition::new(
+            ConstrainedBox::new(ChildView::new(&self.editor).finish())
+                .with_max_height(editor_height)
+                .finish(),
+            &self.editor_save_position_id(),
+        )
+        .finish();
+        let mut content = Flex::column();
+        if !prompt.is_empty() {
+            content.add_child(
+                Text::new(
+                    prompt,
+                    appearance.monospace_font_family(),
+                    appearance.monospace_font_size(),
+                )
+                .finish(),
+            );
+        }
+        content.add_child(editor);
+
+        let mut stack = Stack::new().with_constrain_absolute_children();
+        stack.add_child(
+            EventHandler::new(
+                Container::new(content.finish())
+                    .with_padding_left(*crate::terminal::view::PADDING_LEFT)
+                    .with_padding_right(*crate::terminal::view::PADDING_LEFT)
+                    .with_padding_bottom(4.)
+                    .finish(),
+            )
+            .on_left_mouse_down(|ctx, _, _| {
+                ctx.dispatch_typed_action(crate::terminal::input::InputAction::FocusInputBox);
+                DispatchEventResult::StopPropagation
+            })
+            .finish(),
+        );
+        if self.is_pane_focused(app) {
+            add_input_suggestions_overlays(
+                self,
+                &mut stack,
+                appearance,
+                self.menu_positioning(app),
+                app,
+            );
+        }
+
+        SavePosition::new(
+            Container::new(stack.finish())
+                .with_border(
+                    Border::top(get_input_box_top_border_width())
+                        .with_border_fill(appearance.theme().outline()),
+                )
+                .finish(),
+            &self.save_position_id(),
+        )
+        .finish()
     }
 }

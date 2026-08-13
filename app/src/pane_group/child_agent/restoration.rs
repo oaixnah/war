@@ -72,6 +72,9 @@ impl PaneGroup {
         pane_id: PaneId,
         ctx: &mut ViewContext<Self>,
     ) {
+        if self.server_api.is_none() {
+            return;
+        }
         let Some(terminal_pane_id) = pane_id.as_terminal_pane_id() else {
             return;
         };

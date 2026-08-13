@@ -14,6 +14,8 @@ cfg_if::cfg_if! {
             resource_center::TipsCompleted,
         };
         use crate::terminal::model::session::Sessions;
+        use crate::terminal::model::session::SessionId;
+        use crate::terminal::model::block::BlockMetadata;
         use crate::terminal::model_events::ModelEventDispatcher;
         use crate::terminal::view::WARP_PROMPT_HEIGHT_LINES;
         use crate::terminal::{SizeInfo, TerminalModel};
@@ -36,10 +38,30 @@ impl TerminalView {
     }
 
     #[cfg(test)]
+    pub fn new_local_for_test(
+        tips_model: ModelHandle<TipsCompleted>,
+        restored_blocks: Option<&[SerializedBlockListItem]>,
+        ctx: &mut ViewContext<Self>,
+    ) -> Self {
+        Self::new_for_test_impl(tips_model, restored_blocks, false, true, ctx)
+    }
+
+    #[cfg(test)]
     pub fn new_for_test_with_cloud_mode(
         tips_model: ModelHandle<TipsCompleted>,
         restored_blocks: Option<&[SerializedBlockListItem]>,
         is_cloud_mode: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> Self {
+        Self::new_for_test_impl(tips_model, restored_blocks, is_cloud_mode, false, ctx)
+    }
+
+    #[cfg(test)]
+    fn new_for_test_impl(
+        tips_model: ModelHandle<TipsCompleted>,
+        restored_blocks: Option<&[SerializedBlockListItem]>,
+        is_cloud_mode: bool,
+        is_local_shell: bool,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         use pathfinder_geometry::vector::vec2f;
@@ -80,10 +102,9 @@ impl TerminalView {
             warp_prompt_height_lines: WARP_PROMPT_HEIGHT_LINES,
         };
 
-        let server_api = ServerApiProvider::new_for_test().get();
         let terminal_view_resources = TerminalViewResources {
             tips_completed: tips_model,
-            server_api: server_api.clone(),
+            server_api: (!is_local_shell).then(|| ServerApiProvider::new_for_test().get()),
             model_event_sender: None,
         };
 
@@ -130,5 +151,18 @@ impl TerminalView {
     #[cfg(test)]
     pub fn rich_content_view_count_for_test(&self) -> usize {
         self.rich_content_views.len()
+    }
+
+    #[cfg(test)]
+    pub fn set_active_block_session_id_for_test(
+        &mut self,
+        session_id: SessionId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let metadata = BlockMetadata::new(Some(session_id), None);
+        self.active_block_metadata = Some(metadata.clone());
+        self.input.update(ctx, |input, ctx| {
+            input.set_active_block_metadata(metadata, false, ctx);
+        });
     }
 }

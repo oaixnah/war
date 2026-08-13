@@ -439,14 +439,15 @@ impl<P: BackingView> PaneHeader<P> {
         // Check if tooltip has been dismissed already.
         // We should only trigger this if we are in a git repository,
         // but the pane header will only render if we are already in one.
-        let auth_state = crate::auth::AuthStateProvider::as_ref(app).get();
-        let should_show_tooltip = FeatureFlag::CodeLaunchModal.is_enabled()
-            && !auth_state.is_onboarded().unwrap_or_default() // We only want to show the tooltip for new users.
+        let should_show_tooltip = !self.toolbelt_buttons.is_empty()
+            && FeatureFlag::CodeLaunchModal.is_enabled()
+            && !crate::auth::AuthStateProvider::as_ref(app)
+                .get()
+                .is_onboarded()
+                .unwrap_or_default() // We only want to show the tooltip for new users.
             && !*CodeSettings::as_ref(app)
                 .dismissed_code_toolbelt_new_feature_popup
-                .value()
-                // We should not render the tooltip if no code toolbelt buttons are present.
-                && !self.toolbelt_buttons.is_empty();
+                .value();
 
         if should_show_tooltip {
             // Position the FeaturePopup tooltip below the header
@@ -563,9 +564,11 @@ impl<P: BackingView> PaneHeader<P> {
                 }
             }
             OpenOverlay::SharingDialog => {
-                if self.is_sharing_dialog_enabled(app) {
+                if self.is_sharing_dialog_enabled(app)
+                    && let Some(sharing_dialog) = self.sharing_dialog()
+                {
                     stack.add_positioned_overlay_child(
-                        ChildView::new(self.sharing_dialog()).finish(),
+                        ChildView::new(sharing_dialog).finish(),
                         OffsetPositioning::offset_from_parent(
                             vec2f(-8., 0.),
                             ParentOffsetBounds::WindowByPosition,

@@ -22,6 +22,7 @@ use warpui::{AppContext, SingletonEntity};
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::auth;
 use crate::auth::AuthStateProvider;
+use crate::channel::{Channel, ChannelState};
 use crate::default_terminal::DefaultTerminal;
 use crate::features::{FeatureFlag, runtime_flags_menu_items};
 use crate::root_view::OpenLaunchConfigArg;
@@ -63,6 +64,10 @@ const MAX_RECENT_REPOS_IN_MENU: usize = 10;
 
 /// Creates the root app menu bar
 pub fn menu_bar(ctx: &mut AppContext) -> MenuBar {
+    if ChannelState::channel() == Channel::Oss {
+        return local_menu_bar(ctx);
+    }
+
     MenuBar::new(vec![
         make_new_app_menu(ctx),
         make_new_file_menu(ctx),
@@ -74,6 +79,98 @@ pub fn menu_bar(ctx: &mut AppContext) -> MenuBar {
         make_new_drive_menu(ctx),
         make_new_window_menu(),
         make_new_help_menu(),
+    ])
+}
+
+fn local_menu_bar(ctx: &AppContext) -> MenuBar {
+    let app_menu = Menu::new(
+        "War",
+        vec![
+            #[cfg(target_os = "macos")]
+            MenuItem::Services,
+            MenuItem::Standard(StandardAction::Hide),
+            MenuItem::Standard(StandardAction::HideOtherApps),
+            MenuItem::Standard(StandardAction::ShowAllApps),
+            MenuItem::Separator,
+            MenuItem::Standard(StandardAction::Quit),
+        ],
+    );
+    let file_menu = Menu::new(
+        "File",
+        vec![
+            MenuItem::Custom(CustomMenuItem::new(
+                "New Window",
+                open_new_window,
+                no_updates,
+                Keystroke::parse("cmd-n").ok(),
+            )),
+            MenuItem::Custom(CustomMenuItem::new(
+                "New Tab",
+                open_new_default_tab_or_window,
+                no_updates,
+                custom_shortcut(CustomAction::NewTab),
+            )),
+            MenuItem::Separator,
+            updateable_custom_item_without_checkmark(CustomAction::CloseCurrentSession, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::CloseWindow, ctx),
+        ],
+    );
+    let view_menu = Menu::new(
+        "View",
+        vec![
+            updateable_custom_item_without_checkmark(CustomAction::History, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::CommandSearch, ctx),
+            MenuItem::Separator,
+            updateable_custom_item_without_checkmark(CustomAction::IncreaseFontSize, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::DecreaseFontSize, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::ResetFontSize, ctx),
+        ],
+    );
+    let tab_menu = Menu::new(
+        "Tab",
+        vec![
+            updateable_custom_item_without_checkmark(CustomAction::SplitPaneRight, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::SplitPaneDown, ctx),
+            MenuItem::Separator,
+            updateable_custom_item_without_checkmark(CustomAction::CycleNextSession, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::CyclePrevSession, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::ActivateNextPane, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::ActivatePreviousPane, ctx),
+            MenuItem::Separator,
+            updateable_custom_item_without_checkmark(CustomAction::ToggleMaximizePane, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::CloseTab, ctx),
+        ],
+    );
+    let blocks_menu = Menu::new(
+        "Blocks",
+        vec![
+            updateable_custom_item_without_checkmark(CustomAction::ClearBlocks, ctx),
+            MenuItem::Separator,
+            updateable_custom_item_without_checkmark(CustomAction::SelectBlockAbove, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::SelectBlockBelow, ctx),
+            MenuItem::Separator,
+            updateable_custom_item_without_checkmark(CustomAction::CopyBlock, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::CopyBlockCommand, ctx),
+            updateable_custom_item_without_checkmark(CustomAction::CopyBlockOutput, ctx),
+        ],
+    );
+    let help_menu = Menu::new(
+        "Help",
+        vec![link_menu_item(
+            "War on GitHub...",
+            links::GITHUB_ISSUES_URL.into(),
+        )],
+    );
+
+    MenuBar::new(vec![
+        app_menu,
+        file_menu,
+        make_new_edit_menu(ctx),
+        view_menu,
+        tab_menu,
+        blocks_menu,
+        make_new_window_menu(),
+        help_menu,
     ])
 }
 
@@ -210,7 +307,7 @@ fn make_new_app_menu(ctx: &AppContext) -> Menu {
     menu_items.push(MenuItem::Standard(StandardAction::ShowAllApps));
     menu_items.push(MenuItem::Separator);
     menu_items.push(MenuItem::Custom(CustomMenuItem::new(
-        "Set Warp as Default Terminal",
+        "Set War as Default Terminal",
         move |ctx| {
             DefaultTerminal::handle(ctx).update(ctx, |default_terminal, ctx| {
                 default_terminal.make_warp_default(ctx)
@@ -245,7 +342,7 @@ fn make_new_app_menu(ctx: &AppContext) -> Menu {
         None,
     )));
     menu_items.push(MenuItem::Standard(StandardAction::Quit));
-    Menu::new("Warp", menu_items)
+    Menu::new("War", menu_items)
 }
 
 fn make_new_file_menu(ctx: &AppContext) -> Menu {
@@ -301,7 +398,7 @@ fn make_new_edit_menu(ctx: &AppContext) -> Menu {
     ];
     let group_5 = vec![
         MenuItem::Custom(CustomMenuItem::new(
-            "Use Warp's Prompt",
+            "Use War's Prompt",
             move |ctx| ctx.dispatch_global_action("app:toggle_user_ps1", &()),
             move |_props, ctx| MenuItemPropertyChanges {
                 checked: Some(

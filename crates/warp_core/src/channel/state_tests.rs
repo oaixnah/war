@@ -1,4 +1,15 @@
-use super::derive_http_origin_from_ws_url;
+use super::{ChannelState, derive_http_origin_from_ws_url};
+
+#[test]
+fn oss_defaults_use_war_identity() {
+    let state = ChannelState::init();
+
+    assert_eq!(state.config.app_id.to_string(), "tech.oaix.War");
+    assert_ne!(state.config.app_id.to_string(), "dev.warp.WarpOss");
+    assert_eq!(state.config.logfile_name, "war.log");
+    assert_ne!(state.config.logfile_name, "warp-oss.log");
+    assert_eq!(ChannelState::url_scheme(), "war");
+}
 
 #[test]
 fn wss_becomes_https_and_strips_path() {

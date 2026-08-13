@@ -118,6 +118,45 @@ impl PaneNodeSnapshot {
             }
         }
     }
+
+    fn is_local_terminal_only(&self) -> bool {
+        match self {
+            PaneNodeSnapshot::Branch(branch) => branch
+                .children
+                .iter()
+                .all(|(_, child)| child.is_local_terminal_only()),
+            PaneNodeSnapshot::Leaf(leaf) => match &leaf.contents {
+                LeafContents::Terminal(terminal) => terminal.is_local_terminal_only(),
+                LeafContents::Notebook(_)
+                | LeafContents::AIDocument(_)
+                | LeafContents::Code(_)
+                | LeafContents::EnvVarCollection(_)
+                | LeafContents::EnvironmentManagement(_)
+                | LeafContents::Workflow(_)
+                | LeafContents::Settings(_)
+                | LeafContents::AIFact(_)
+                | LeafContents::CustomRouterEditor
+                | LeafContents::ExecutionProfileEditor
+                | LeafContents::CodeReview(_)
+                | LeafContents::AmbientAgent(_)
+                | LeafContents::NetworkLog
+                | LeafContents::GetStarted => false,
+            },
+        }
+    }
+}
+
+impl WindowSnapshot {
+    pub(crate) fn is_local_terminal_only(&self) -> bool {
+        !self.tabs.is_empty()
+            && self.team_uid.is_none()
+            && self.agent_management_filters.is_none()
+            && self.tabs.iter().all(|tab| {
+                tab.left_panel.is_none()
+                    && tab.right_panel.is_none()
+                    && tab.root.is_local_terminal_only()
+            })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -216,6 +255,20 @@ pub struct TerminalPaneSnapshot {
     /// The active conversation ID if the agent view was open in fullscreen mode.
     /// When `Some`, the agent view should be restored to fullscreen for this conversation.
     pub active_conversation_id: Option<AIConversationId>,
+}
+
+impl TerminalPaneSnapshot {
+    fn is_local_terminal_only(&self) -> bool {
+        self.shell_launch_data
+            .as_ref()
+            .is_none_or(|launch_data| matches!(launch_data, ShellLaunchData::Executable { .. }))
+            && !self.is_read_only
+            && self.input_config.is_none()
+            && self.llm_model_override.is_none()
+            && self.active_profile_id.is_none()
+            && self.conversation_ids_to_restore.is_empty()
+            && self.active_conversation_id.is_none()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -56,6 +56,19 @@ pub(crate) fn history_data_source_for_session(
     history_data_source_from_shared(commands)
 }
 
+pub(crate) fn local_history_data_source_for_session(
+    session_id: SessionId,
+    history_model: &terminal::History,
+) -> AsyncSnapshotDataSource<HistorySnapshot, CommandSearchItemAction> {
+    let commands = history_model
+        .commands_shared(session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| !entry.is_agent_executed)
+        .collect();
+    history_data_source_from_shared(commands)
+}
+
 pub(crate) fn fuzzy_match_history(
     snapshot: HistorySnapshot,
 ) -> BoxFuture<'static, Result<Vec<QueryResult<CommandSearchItemAction>>, DataSourceRunErrorWrapper>>

@@ -298,9 +298,12 @@ impl TerminalView {
                     | RichContentMetadata::TerminalViewZeroState
             )
         );
-        let is_use_agent_footer = handle.id() == self.use_agent_footer.id();
+        let is_use_agent_footer =
+            self.server_api.is_some() && handle.id() == self.use_agent_footer.id();
 
-        let (agent_view_conversation_id, should_hide) = if is_agent_view_scoped_terminal_content {
+        let (agent_view_conversation_id, should_hide) = if self.server_api.is_none() {
+            (None, false)
+        } else if is_agent_view_scoped_terminal_content {
             (None, self.agent_view_controller.as_ref(ctx).is_active())
         } else if is_use_agent_footer {
             (

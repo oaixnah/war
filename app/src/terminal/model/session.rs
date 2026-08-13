@@ -137,6 +137,8 @@ pub struct Sessions {
     /// Tracks the remote server setup state for SSH sessions that have the
     /// `SshRemoteServer` feature flag enabled. Keyed by the pending session ID.
     remote_server_setup_states: HashMap<SessionId, RemoteServerSetupState>,
+
+    ssh_remote_server_support: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -169,13 +171,28 @@ impl Sessions {
         executor_command_tx: Sender<ExecutorCommandEvent>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
+        Self::new_with_ssh_remote_server_support(executor_command_tx, true, ctx)
+    }
+
+    pub(crate) fn new_without_ssh_remote_server(
+        executor_command_tx: Sender<ExecutorCommandEvent>,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
+        Self::new_with_ssh_remote_server_support(executor_command_tx, false, ctx)
+    }
+
+    fn new_with_ssh_remote_server_support(
+        executor_command_tx: Sender<ExecutorCommandEvent>,
+        ssh_remote_server_support: bool,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
         // Track the connected host_id on the `Session` type so downstream
         // code can distinguish hosts. The `RemoteServerCommandExecutor`
         // client itself is baked in at session construction time
         // (see `new_command_executor_for_local_tty_session`) so we no
         // longer need to wire it here on connect/disconnect.
         #[cfg(feature = "local_tty")]
-        if FeatureFlag::SshRemoteServer.is_enabled() {
+        if ssh_remote_server_support && FeatureFlag::SshRemoteServer.is_enabled() {
             let mgr = RemoteServerManager::handle(ctx);
             ctx.subscribe_to_model(&mgr, |sessions, _, event, ctx| match event {
                 RemoteServerManagerEvent::SessionConnected {
@@ -255,6 +272,7 @@ impl Sessions {
             executor_for_all_sessions: None,
             env_vars: Default::default(),
             remote_server_setup_states: Default::default(),
+            ssh_remote_server_support,
         }
     }
 
@@ -280,6 +298,7 @@ impl Sessions {
             executor_for_all_sessions: None,
             env_vars: Default::default(),
             remote_server_setup_states: Default::default(),
+            ssh_remote_server_support: false,
         }
     }
 
@@ -404,7 +423,8 @@ impl Sessions {
         // RemoteServerCommandExecutor already has its client baked in, so
         // nothing else needs to be wired here.
         #[cfg(feature = "local_tty")]
-        if FeatureFlag::SshRemoteServer.is_enabled()
+        if self.ssh_remote_server_support
+            && FeatureFlag::SshRemoteServer.is_enabled()
             && matches!(
                 session_info.session_type,
                 BootstrapSessionType::WarpifiedRemote

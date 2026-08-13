@@ -1007,6 +1007,85 @@ enum TabBarSlot {
 }
 
 pub struct Workspace {
+    local: Option<LocalWorkspaceState>,
+    hosted: Option<Box<HostedWorkspaceState>>,
+}
+
+struct LocalWorkspaceState {
+    tabs: Vec<ViewHandle<PaneGroup>>,
+    active_tab_index: usize,
+    tips_completed: ModelHandle<TipsCompleted>,
+    user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
+    model_event_sender: Option<mpsc::SyncSender<ModelEvent>>,
+    command_search_view: ViewHandle<CommandSearchView>,
+    is_command_search_open: bool,
+}
+
+type LocalPaneLayout = (
+    PanesLayout,
+    Arc<HashMap<PaneUuid, Vec<SerializedBlockListItem>>>,
+    Option<String>,
+);
+
+fn local_pane_layouts(source: NewWorkspaceSource) -> (Vec<LocalPaneLayout>, usize) {
+    match source {
+        NewWorkspaceSource::Restored {
+            window_snapshot,
+            block_lists,
+        } if window_snapshot.is_local_terminal_only() => {
+            let active_tab_index = window_snapshot.active_tab_index;
+            let layouts = window_snapshot
+                .tabs
+                .into_iter()
+                .map(|tab| {
+                    (
+                        PanesLayout::Snapshot(Box::new(tab.root)),
+                        block_lists.clone(),
+                        tab.custom_title,
+                    )
+                })
+                .collect();
+            (layouts, active_tab_index)
+        }
+        NewWorkspaceSource::Session { options } => (
+            vec![(
+                PanesLayout::SingleTerminal(Box::new(local_terminal_options(*options))),
+                Arc::new(HashMap::new()),
+                None,
+            )],
+            0,
+        ),
+        NewWorkspaceSource::Empty { shell, .. } => (
+            vec![(
+                PanesLayout::SingleTerminal(Box::new(local_terminal_options(NewTerminalOptions {
+                    shell,
+                    ..Default::default()
+                }))),
+                Arc::new(HashMap::new()),
+                None,
+            )],
+            0,
+        ),
+        _ => (
+            vec![(
+                PanesLayout::SingleTerminal(Box::default()),
+                Arc::new(HashMap::new()),
+                None,
+            )],
+            0,
+        ),
+    }
+}
+
+fn local_terminal_options(options: NewTerminalOptions) -> NewTerminalOptions {
+    NewTerminalOptions {
+        conversation_restoration: None,
+        is_shared_session_creator: Default::default(),
+        ..options
+    }
+}
+
+pub struct HostedWorkspaceState {
     window_id: WindowId,
     pub(crate) tabs: Vec<TabData>,
     active_tab_index: usize,
@@ -1203,9 +1282,396 @@ pub struct Workspace {
     create_auth_secret_modal: Option<ViewHandle<Modal<AuthSecretFtuxView>>>,
 }
 
+impl std::ops::Deref for Workspace {
+    type Target = HostedWorkspaceState;
+
+    fn deref(&self) -> &Self::Target {
+        self.hosted
+            .as_deref()
+            .expect("hosted workspace state is unavailable on the OSS local path")
+    }
+}
+
+impl std::ops::DerefMut for Workspace {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.hosted
+            .as_deref_mut()
+            .expect("hosted workspace state is unavailable on the OSS local path")
+    }
+}
+
 impl Workspace {
+    pub fn new_local(
+        global_resource_handles: GlobalResourceHandles,
+        workspace_setting: NewWorkspaceSource,
+        ctx: &mut ViewContext<Self>,
+    ) -> Self {
+        terminal::platform::init().expect("Terminal platform initialized");
+
+        let modal_sizes = match &workspace_setting {
+            NewWorkspaceSource::Restored {
+                window_snapshot, ..
+            } if window_snapshot.is_local_terminal_only() => ModalSizes::from_restored(
+                window_snapshot,
+                DEFAULT_LEFT_PANEL_WIDTH,
+                DEFAULT_RIGHT_PANEL_WIDTH,
+            ),
+            _ => ModalSizes::default(),
+        };
+        let window_id = ctx.window_id();
+        ResizableData::handle(ctx).update(ctx, |data, _| {
+            data.insert(window_id, modal_sizes);
+        });
+
+        let GlobalResourceHandles {
+            model_event_sender,
+            tips_completed,
+            user_default_shell_unsupported_banner_model_handle,
+            ..
+        } = global_resource_handles;
+        let (layouts, active_tab_index) = local_pane_layouts(workspace_setting);
+        let tabs = layouts
+            .into_iter()
+            .map(|(layout, block_lists, title)| {
+                let tips_completed = tips_completed.clone();
+                let banner = user_default_shell_unsupported_banner_model_handle.clone();
+                let model_event_sender = model_event_sender.clone();
+                ctx.add_typed_action_view(move |ctx| {
+                    let mut pane_group = PaneGroup::new_with_panes_layout(
+                        tips_completed,
+                        banner,
+                        None,
+                        layout,
+                        block_lists,
+                        model_event_sender,
+                        ctx,
+                    );
+                    if let Some(title) = title {
+                        pane_group.set_title(&title, ctx);
+                    }
+                    pane_group
+                })
+            })
+            .collect::<Vec<_>>();
+        for pane_group in &tabs {
+            Self::subscribe_to_local_pane_group(pane_group, ctx);
+        }
+        let active_tab_index = active_tab_index.min(tabs.len().saturating_sub(1));
+        let command_search_view = ctx.add_typed_action_view(CommandSearchView::new_local);
+        ctx.subscribe_to_view(&command_search_view, |workspace, _, event, ctx| {
+            workspace.handle_local_command_search_event(event, ctx);
+        });
+
+        let workspace = Self {
+            local: Some(LocalWorkspaceState {
+                tabs,
+                active_tab_index,
+                tips_completed,
+                user_default_shell_unsupported_banner_model_handle,
+                model_event_sender,
+                command_search_view,
+                is_command_search_open: false,
+            }),
+            hosted: None,
+        };
+        let window_id = ctx.window_id();
+        let handle = ctx.handle();
+        WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+            registry.register(window_id, handle);
+        });
+        workspace.focus_local_active_tab(ctx);
+        workspace
+    }
+
+    fn local_state(&self) -> Option<&LocalWorkspaceState> {
+        self.local.as_ref()
+    }
+
+    fn local_state_mut(&mut self) -> Option<&mut LocalWorkspaceState> {
+        self.local.as_mut()
+    }
+
+    fn focus_local_active_tab(&self, ctx: &mut ViewContext<Self>) {
+        if let Some(local) = self.local_state()
+            && let Some(pane_group) = local.tabs.get(local.active_tab_index)
+        {
+            pane_group.update(ctx, |pane_group, ctx| pane_group.focus(ctx));
+        }
+    }
+
+    fn subscribe_to_local_pane_group(
+        pane_group: &ViewHandle<PaneGroup>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        ctx.subscribe_to_view(pane_group, |workspace, pane_group, event, ctx| {
+            workspace.handle_local_pane_group_event(pane_group, event, ctx);
+        });
+    }
+
+    fn handle_local_pane_group_event(
+        &mut self,
+        pane_group: ViewHandle<PaneGroup>,
+        event: &pane_group::Event,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            pane_group::Event::AppStateChanged => {
+                ctx.dispatch_global_action("workspace:save_app", ());
+            }
+            pane_group::Event::Exited { add_to_undo_stack } => {
+                if let Some(index) = self.local_state().and_then(|local| {
+                    local
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.id() == pane_group.id())
+                }) {
+                    self.close_local_tab(index, *add_to_undo_stack, ctx);
+                }
+            }
+            pane_group::Event::PaneTitleUpdated | pane_group::Event::TerminalViewStateChanged => {
+                ctx.notify();
+            }
+            pane_group::Event::ShowCommandSearch(options) => {
+                self.show_local_command_search(options.filter, &options.init_content, ctx);
+            }
+            _ => {}
+        }
+    }
+
+    fn show_local_command_search(
+        &mut self,
+        query_filter: Option<search::QueryFilter>,
+        init_content: &InitContent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(session_id) = self.active_session_id(ctx) else {
+            return;
+        };
+        let Some(input) = self.get_active_input_view_handle(ctx) else {
+            return;
+        };
+        let initial_query = match init_content {
+            InitContent::FromInputBuffer => input.read(ctx, |input, ctx| input.buffer_text(ctx)),
+            InitContent::Custom(query) => query.clone(),
+        };
+        let menu_positioning = input.read(ctx, |input, ctx| input.menu_positioning(ctx));
+        input.update(ctx, |input, ctx| input.close_input_suggestions(false, ctx));
+
+        let local = self.local_state_mut().expect("local state checked above");
+        local.is_command_search_open = true;
+        local.command_search_view.update(ctx, |view, ctx| {
+            view.reset_state(
+                session_id,
+                None,
+                initial_query,
+                query_filter.or(Some(search::QueryFilter::History)),
+                menu_positioning,
+                None,
+                ctx,
+            );
+        });
+        ctx.focus(&local.command_search_view);
+        ctx.notify();
+    }
+
+    fn handle_local_command_search_event(
+        &mut self,
+        event: &CommandSearchEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(input) = self.get_active_input_view_handle(ctx) else {
+            return;
+        };
+        match event {
+            CommandSearchEvent::Close { query, filter } => {
+                self.local_state_mut()
+                    .expect("local command search requires local state")
+                    .is_command_search_open = false;
+                input.update(ctx, |input, ctx| {
+                    input.handle_command_search_closed(query, filter, ctx);
+                    input.focus_input_box(ctx);
+                });
+            }
+            CommandSearchEvent::Blur => {
+                self.local_state_mut()
+                    .expect("local command search requires local state")
+                    .is_command_search_open = false;
+            }
+            CommandSearchEvent::ItemSelected { payload, .. } => match payload.as_ref() {
+                CommandSearchItemAction::AcceptHistory(item) => {
+                    input.update(ctx, |input, ctx| {
+                        input.replace_buffer_content(&item.command, ctx);
+                        input.focus_input_box(ctx);
+                    });
+                }
+                CommandSearchItemAction::ExecuteHistory(command) => {
+                    input.update(ctx, |input, ctx| input.try_execute_command(command, ctx));
+                }
+                _ => unreachable!("local command search exposes only history actions"),
+            },
+            CommandSearchEvent::Resize => {}
+        }
+        ctx.notify();
+    }
+
+    fn add_local_terminal_tab(&mut self, options: NewTerminalOptions, ctx: &mut ViewContext<Self>) {
+        let options = local_terminal_options(options);
+        let local = self
+            .local_state()
+            .expect("local terminal tabs require local workspace state");
+        let tips_completed = local.tips_completed.clone();
+        let banner = local
+            .user_default_shell_unsupported_banner_model_handle
+            .clone();
+        let model_event_sender = local.model_event_sender.clone();
+        let pane_group = ctx.add_typed_action_view(move |ctx| {
+            PaneGroup::new_with_panes_layout(
+                tips_completed,
+                banner,
+                None,
+                PanesLayout::SingleTerminal(Box::new(options)),
+                Arc::new(HashMap::new()),
+                model_event_sender,
+                ctx,
+            )
+        });
+        Self::subscribe_to_local_pane_group(&pane_group, ctx);
+        let local = self
+            .local_state_mut()
+            .expect("local terminal tabs require local workspace state");
+        local.tabs.push(pane_group);
+        local.active_tab_index = local.tabs.len() - 1;
+        self.focus_local_active_tab(ctx);
+        ctx.notify();
+    }
+
+    fn handle_local_action(
+        &mut self,
+        action: &WorkspaceAction,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if self.local_state().is_none() {
+            return false;
+        }
+
+        use WorkspaceAction::*;
+        match action {
+            ActivateTab(index) => self.activate_local_tab(*index, ctx),
+            ActivateTabByNumber(number) => self.activate_local_tab(number.saturating_sub(1), ctx),
+            ActivatePrevTab | CyclePrevSession => {
+                let local = self.local_state().expect("checked above");
+                let index = if local.active_tab_index == 0 {
+                    local.tabs.len() - 1
+                } else {
+                    local.active_tab_index - 1
+                };
+                self.activate_local_tab(index, ctx);
+            }
+            ActivateNextTab | CycleNextSession => {
+                let local = self.local_state().expect("checked above");
+                self.activate_local_tab((local.active_tab_index + 1) % local.tabs.len(), ctx);
+            }
+            ActivateLastTab => {
+                let index = self.local_state().expect("checked above").tabs.len() - 1;
+                self.activate_local_tab(index, ctx);
+            }
+            ShowCommandSearch(options) => {
+                self.show_local_command_search(options.filter, &options.init_content, ctx)
+            }
+            AddDefaultTab | AddTerminalTab { .. } => {
+                self.add_local_terminal_tab(NewTerminalOptions::default(), ctx)
+            }
+            AddTabWithShell { shell, .. } => self.add_local_terminal_tab(
+                NewTerminalOptions {
+                    shell: Some(shell.clone()),
+                    ..Default::default()
+                },
+                ctx,
+            ),
+            CloseActiveTab => {
+                let index = self.local_state().expect("checked above").active_tab_index;
+                self.close_local_tab(index, true, ctx);
+            }
+            CloseTab(index) => self.close_local_tab(*index, true, ctx),
+            AddWindow => ctx.dispatch_global_action("root_view:open_new", ()),
+            AddWindowWithShell { shell } => {
+                ctx.dispatch_global_action("root_view:open_new_with_shell", Some(shell.clone()))
+            }
+            CloseWindow if ContextFlag::CloseWindow.is_enabled() => ctx.close_window(),
+            TerminateApp => ctx.terminate_app(TerminationMode::Cancellable, None),
+            _ => {}
+        }
+        if action.should_save_app_state_on_action() {
+            ctx.dispatch_global_action("workspace:save_app", ());
+        }
+        true
+    }
+
+    fn activate_local_tab(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let local = self
+            .local_state_mut()
+            .expect("local state checked by caller");
+        if index < local.tabs.len() {
+            local.active_tab_index = index;
+            self.focus_local_active_tab(ctx);
+            ctx.notify();
+        }
+    }
+
+    fn close_local_tab(
+        &mut self,
+        index: usize,
+        add_to_undo_stack: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let local = self
+            .local_state_mut()
+            .expect("local state checked by caller");
+        if index >= local.tabs.len() {
+            return;
+        }
+        if local.tabs.len() == 1 {
+            if ContextFlag::CloseWindow.is_enabled() {
+                ctx.close_window();
+            }
+            return;
+        }
+        let pane_group = local.tabs.remove(index);
+        pane_group.update(ctx, |pane_group, ctx| pane_group.detach_panes(ctx));
+        if add_to_undo_stack {
+            let workspace = ctx.handle();
+            UndoCloseStack::handle(ctx).update(ctx, |stack, ctx| {
+                stack.handle_local_tab_closed(workspace, index, pane_group.clone(), ctx);
+            });
+        } else {
+            pane_group.update(ctx, |pane_group, ctx| pane_group.clean_up_panes(ctx));
+        }
+        local.active_tab_index = local.active_tab_index.min(local.tabs.len() - 1);
+        self.focus_local_active_tab(ctx);
+        ctx.notify();
+    }
+
+    pub(crate) fn restore_closed_local_tab(
+        &mut self,
+        tab_index: usize,
+        pane_group: ViewHandle<PaneGroup>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(local) = self.local_state_mut() else {
+            return;
+        };
+        pane_group.update(ctx, |pane_group, ctx| pane_group.reattach_panes(ctx));
+        let insert_index = tab_index.min(local.tabs.len());
+        local.tabs.insert(insert_index, pane_group);
+        local.active_tab_index = insert_index;
+        self.focus_local_active_tab(ctx);
+        ctx.notify();
+    }
+
     pub fn is_tab_drag_preview(&self) -> bool {
-        self.is_tab_drag_preview
+        self.hosted
+            .as_ref()
+            .is_some_and(|hosted| hosted.is_tab_drag_preview)
     }
 
     pub(crate) fn set_is_tab_drag_preview(&mut self, value: bool) {
@@ -2911,11 +3377,13 @@ impl Workspace {
             me.handle_referral_theme_status_event(event, ctx);
         });
 
-        let referrals_client = ServerApiProvider::as_ref(ctx).get_referrals_client();
-        // On startup, check if the user has earned a referral theme by referring other users
-        referral_theme_status.update(ctx, |model, ctx| {
-            model.query_referral_status(referrals_client, ctx);
-        });
+        if ChannelState::channel() != Channel::Oss {
+            let referrals_client = ServerApiProvider::as_ref(ctx).get_referrals_client();
+            // On startup, check if the user has earned a referral theme by referring other users
+            referral_theme_status.update(ctx, |model, ctx| {
+                model.query_referral_status(referrals_client, ctx);
+            });
+        }
 
         let bindings_notifier = KeybindingChangedNotifier::handle(ctx);
         ctx.subscribe_to_model(&bindings_notifier, |me, _, event, ctx| {
@@ -3381,7 +3849,7 @@ impl Workspace {
             },
         );
 
-        let mut ws = Self {
+        let hosted = HostedWorkspaceState {
             tabs: Vec::new(),
             active_tab_index: 0,
             tab_mru_order: Vec::new(),
@@ -3531,6 +3999,10 @@ impl Workspace {
                 Self::build_remove_tab_config_confirmation_dialog(ctx),
             handoff_environment_creation_modal: None,
             create_auth_secret_modal: None,
+        };
+        let mut ws = Self {
+            local: None,
+            hosted: Some(Box::new(hosted)),
         };
 
         ws.configure_new_workspace(workspace_setting, ctx);
@@ -4441,8 +4913,8 @@ impl Workspace {
 
         self.tabs.push(TabData::new(new_pane_group.clone()));
         let new_tab_index = self.tab_count() - 1;
-        self.tab_mru_order
-            .push(self.tabs[new_tab_index].pane_group.id());
+        let pane_group_id = self.tabs[new_tab_index].pane_group.id();
+        self.tab_mru_order.push(pane_group_id);
         self.activate_tab_internal(new_tab_index, ctx);
 
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
@@ -5143,7 +5615,8 @@ impl Workspace {
     }
 
     pub fn active_tab_index(&self) -> usize {
-        self.active_tab_index
+        self.local_state()
+            .map_or_else(|| self.active_tab_index, |local| local.active_tab_index)
     }
 
     pub fn is_overflow_menu_showing(&self) -> bool {
@@ -5154,24 +5627,33 @@ impl Workspace {
         self.current_workspace_state.is_resource_center_open
     }
 
-    #[cfg(feature = "integration_tests")]
+    #[cfg(any(test, feature = "integration_tests"))]
     pub fn is_command_search_open(&self) -> bool {
-        self.current_workspace_state.is_command_search_open
+        self.local_state().map_or_else(
+            || self.current_workspace_state.is_command_search_open,
+            |local| local.is_command_search_open,
+        )
     }
 
     /// Retrieves the Pane Group view for the passed tab index.
     pub fn get_pane_group_view(&self, index: usize) -> Option<&ViewHandle<PaneGroup>> {
-        self.tabs.get(index).map(|s| &s.pane_group)
+        if let Some(local) = self.local_state() {
+            local.tabs.get(index)
+        } else {
+            self.tabs.get(index).map(|s| &s.pane_group)
+        }
     }
 
     /// Retrieves the Pane Group view for the passed tab index. Unlike the other
     /// method, this does not check for out of bounds.
     pub fn get_pane_group_view_unchecked(&self, index: usize) -> &ViewHandle<PaneGroup> {
-        &self.tabs[index].pane_group
+        self.get_pane_group_view(index)
+            .expect("pane group index should exist")
     }
 
     pub fn tab_count(&self) -> usize {
-        self.tabs.len()
+        self.local_state()
+            .map_or_else(|| self.tabs.len(), |local| local.tabs.len())
     }
 
     #[cfg(test)]
@@ -5227,8 +5709,12 @@ impl Workspace {
             .collect()
     }
 
-    pub fn tab_views(&self) -> impl Iterator<Item = &ViewHandle<PaneGroup>> {
-        self.tabs.iter().map(|s| &s.pane_group)
+    pub fn tab_views(&self) -> Box<dyn Iterator<Item = &ViewHandle<PaneGroup>> + '_> {
+        if let Some(local) = self.local_state() {
+            Box::new(local.tabs.iter())
+        } else {
+            Box::new(self.tabs.iter().map(|s| &s.pane_group))
+        }
     }
 
     /// Get the tab color for a given tab index.
@@ -5295,7 +5781,7 @@ impl Workspace {
 
     /// Returns the PaneGroup view handle for the currently active tab.
     pub fn active_tab_pane_group(&self) -> &ViewHandle<PaneGroup> {
-        self.get_pane_group_view(self.active_tab_index)
+        self.get_pane_group_view(self.active_tab_index())
             .expect("Active tab index entry should exist")
     }
 
@@ -5842,6 +6328,22 @@ impl Workspace {
     /// Focuses the given pane, revealing it first if it is hidden behind a
     /// temporary swap.
     pub fn focus_pane(&mut self, pane_view_locator: PaneViewLocator, ctx: &mut ViewContext<Self>) {
+        if let Some(local) = self.local_state_mut() {
+            if let Some((index, pane_group)) = local
+                .tabs
+                .iter()
+                .enumerate()
+                .find(|(_, pane_group)| pane_group.id() == pane_view_locator.pane_group_id)
+                .map(|(index, pane_group)| (index, pane_group.clone()))
+            {
+                pane_group.update(ctx, |view, ctx| {
+                    view.reveal_and_focus_pane(pane_view_locator.pane_id, ctx);
+                });
+                local.active_tab_index = index;
+                ctx.notify();
+            }
+            return;
+        }
         if let Some((index, tab)) = self
             .tabs
             .iter()
@@ -7111,7 +7613,8 @@ impl Workspace {
             rendered_title,
             ctx,
         );
-        if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
+        let active_tab_index = self.active_tab_index;
+        if let Some(tab) = self.tabs.get_mut(active_tab_index) {
             // Apply tab color if specified, matching the launch config pattern.
             if let Some(color) = tab_color {
                 tab.selected_color = SelectedTabColor::Color(color);
@@ -8052,7 +8555,7 @@ impl Workspace {
         ctx: &AppContext,
         accessor: impl FnOnce(&TerminalView) -> T,
     ) -> Option<T> {
-        self.get_pane_group_view(self.active_tab_index)
+        self.get_pane_group_view(self.active_tab_index())
             .and_then(|view| {
                 view.read(ctx, |pane_group, ctx| {
                     pane_group
@@ -8077,7 +8580,7 @@ impl Workspace {
 
     /// Gets the ID of the active terminal session, if any.
     pub fn active_session_id(&self, ctx: &ViewContext<Self>) -> Option<SessionId> {
-        self.get_pane_group_view(self.active_tab_index)
+        self.get_pane_group_view(self.active_tab_index())
             .and_then(|view| {
                 view.read(ctx, |pane_group, ctx| {
                     pane_group
@@ -11630,6 +12133,47 @@ impl Workspace {
         quake_mode: bool,
         app: &AppContext,
     ) -> WindowSnapshot {
+        if let Some(local) = self.local_state() {
+            let tabs = local
+                .tabs
+                .iter()
+                .map(|pane_group| {
+                    let pane_group = pane_group.as_ref(app);
+                    TabSnapshot {
+                        root: pane_group.snapshot(app),
+                        custom_title: pane_group.custom_title(app),
+                        default_directory_color: None,
+                        selected_color: Default::default(),
+                        left_panel: None,
+                        right_panel: None,
+                        group_id: None,
+                        pinned: false,
+                    }
+                })
+                .collect();
+            return WindowSnapshot {
+                tabs,
+                active_tab_index: local.active_tab_index,
+                team_uid: None,
+                bounds: app.window_bounds(&window_id),
+                fullscreen_state: app
+                    .windows()
+                    .platform_window(window_id)
+                    .map(|window| window.fullscreen_state())
+                    .unwrap_or_default(),
+                quake_mode,
+                universal_search_width: None,
+                warp_ai_width: None,
+                voltron_width: None,
+                warp_drive_index_width: None,
+                left_panel_open: false,
+                vertical_tabs_panel_open: false,
+                left_panel_width: None,
+                right_panel_width: None,
+                agent_management_filters: None,
+                tab_groups: Vec::new(),
+            };
+        }
         let window_bounds = app.window_bounds(&window_id);
         let window_fullscreen_state = app
             .windows()
@@ -12464,8 +13008,8 @@ impl Workspace {
         };
 
         self.tabs.insert(insert_index, tab_data);
-        self.tab_mru_order
-            .push(self.tabs[insert_index].pane_group.id());
+        let pane_group_id = self.tabs[insert_index].pane_group.id();
+        self.tab_mru_order.push(pane_group_id);
 
         // Expand the group so the restored tab is immediately visible.
         if let Some(group_id) = self.tabs[insert_index].group_id {
@@ -12843,8 +13387,8 @@ impl Workspace {
             self.new_tab_index_and_group(ctx)
         };
         self.tabs.insert(insert_idx, TabData::new(new_pane_group));
-        self.tab_mru_order
-            .push(self.tabs[insert_idx].pane_group.id());
+        let pane_group_id = self.tabs[insert_idx].pane_group.id();
+        self.tab_mru_order.push(pane_group_id);
         self.activate_tab_internal(insert_idx, ctx);
 
         // Inherit the active tab's group membership (skipped for top-level tabs).
@@ -12857,10 +13401,11 @@ impl Workspace {
         }
 
         if !is_restoration {
+            let active_tab_index = self.active_tab_index;
             if *TabSettings::as_ref(ctx).preserve_active_tab_color.value()
                 && let Some(SelectedTabColor::Color(color)) = active_tab_selected_color
             {
-                self.tabs[self.active_tab_index].selected_color = SelectedTabColor::Color(color);
+                self.tabs[active_tab_index].selected_color = SelectedTabColor::Color(color);
             }
 
             // preserve the current tab's default directory color when the new tab inherits the working directory
@@ -12872,7 +13417,7 @@ impl Workspace {
                     || wd_config.config_for_source(NewSessionSource::Window).mode
                         == WorkingDirectoryMode::PreviousDir;
                 if inherits_cwd && let Some(color) = active_tab_default_color {
-                    self.tabs[self.active_tab_index].default_directory_color = Some(color);
+                    self.tabs[active_tab_index].default_directory_color = Some(color);
                 }
             }
         }
@@ -12913,12 +13458,13 @@ impl Workspace {
 
         if self.tab_count() == 0 {
             self.tabs.push(TabData::new(new_pane_group));
-            self.tab_mru_order
-                .push(self.tabs.last().unwrap().pane_group.id());
+            let pane_group_id = self.tabs.last().unwrap().pane_group.id();
+            self.tab_mru_order.push(pane_group_id);
             self.activate_tab_internal(self.tab_count() - 1, ctx);
         } else {
             self.tabs.insert(new_idx, TabData::new(new_pane_group));
-            self.tab_mru_order.push(self.tabs[new_idx].pane_group.id());
+            let pane_group_id = self.tabs[new_idx].pane_group.id();
+            self.tab_mru_order.push(pane_group_id);
             self.activate_tab_internal(new_idx, ctx);
         }
 
@@ -16623,9 +17169,9 @@ impl Workspace {
                                 {
                                     let selected = source_tab.selected_color;
                                     let default = source_tab.default_directory_color;
-                                    self.tabs[self.active_tab_index].selected_color = selected;
-                                    self.tabs[self.active_tab_index].default_directory_color =
-                                        default;
+                                    let active_tab_index = self.active_tab_index;
+                                    self.tabs[active_tab_index].selected_color = selected;
+                                    self.tabs[active_tab_index].default_directory_color = default;
                                 }
                             }
                         }
@@ -23843,6 +24389,9 @@ impl TypedActionView for Workspace {
     }
 
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
+        if self.handle_local_action(action, ctx) {
+            return;
+        }
         use WorkspaceAction::*;
         let window_id = ctx.window_id();
 
@@ -26320,11 +26869,35 @@ impl View for Workspace {
     }
 
     fn self_or_child_interacted_with(&self, ctx: &mut ViewContext<Self>) {
+        if self.local_state().is_some() {
+            return;
+        }
         self.sync_window_button_visibility(ctx);
     }
 
     fn keymap_context(&self, app: &AppContext) -> warpui::keymap::Context {
         let mut context = Self::default_keymap_context();
+
+        if let Some(local) = self.local_state() {
+            match local.tabs.len() {
+                1 => {
+                    context.set.insert("Workspace_SingleTab");
+                }
+                n if n > 1 => {
+                    context.set.insert("Workspace_MultipleTabs");
+                    if local.active_tab_index == 0 {
+                        context.set.insert("Workspace_LeftmostTabActive");
+                    } else if local.active_tab_index == n - 1 {
+                        context.set.insert("Workspace_RightmostTabActive");
+                    }
+                }
+                _ => debug_assert!(false, "local workspace should always have a tab"),
+            }
+            if ContextFlag::CloseWindow.is_enabled() {
+                context.set.insert("Workspace_CloseWindow");
+            }
+            return context;
+        }
 
         if NetworkStatus::as_ref(app).is_online() {
             context.set.insert("IsOnline");
@@ -26550,6 +27123,46 @@ impl View for Workspace {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
+        if let Some(local) = self.local_state() {
+            let Some(pane_group) = local.tabs.get(local.active_tab_index) else {
+                return Empty::new().finish();
+            };
+            let mut stack = Stack::new().with_child(ChildView::new(pane_group).finish());
+            if local.is_command_search_open
+                && let Some(input) = self.get_active_input_view_handle(app)
+            {
+                let input_position = input.as_ref(app).save_position_id();
+                let menu_positioning = local.command_search_view.as_ref(app).menu_positioning();
+                let margin = 4.;
+                let positioning = match menu_positioning {
+                    MenuPositioning::AboveInputBox => {
+                        OffsetPositioning::offset_from_save_position_element(
+                            input_position,
+                            vec2f(margin, -margin),
+                            PositionedElementOffsetBounds::WindowBySize,
+                            PositionedElementAnchor::BottomLeft,
+                            ChildAnchor::BottomLeft,
+                        )
+                    }
+                    MenuPositioning::BelowInputBox => {
+                        OffsetPositioning::offset_from_save_position_element(
+                            input_position,
+                            vec2f(margin, 0.),
+                            PositionedElementOffsetBounds::WindowBySize,
+                            PositionedElementAnchor::TopLeft,
+                            ChildAnchor::TopLeft,
+                        )
+                    }
+                };
+                stack.add_positioned_child(
+                    Container::new(ChildView::new(&local.command_search_view).finish())
+                        .with_margin_right(margin)
+                        .finish(),
+                    positioning,
+                );
+            }
+            return stack.finish();
+        }
         let appearance = Appearance::as_ref(app);
 
         let tab_bar_mode = self.tab_bar_mode(app);
@@ -27848,12 +28461,26 @@ impl View for Workspace {
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
         if focus_ctx.is_self_focused() {
-            self.focus_active_tab(ctx);
+            if self.local_state().is_some() {
+                self.focus_local_active_tab(ctx);
+            } else {
+                self.focus_active_tab(ctx);
+            }
         }
     }
 
     /// Update this workspace when it has been closed, but may still be restored.
     fn on_window_closed(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(local) = self.local_state() {
+            for pane_group in &local.tabs {
+                pane_group.update(ctx, |pane_group, ctx| pane_group.detach_panes(ctx));
+            }
+            let window_id = ctx.window_id();
+            WorkspaceRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.unregister(window_id);
+            });
+            return;
+        }
         if !self.suppress_detach_panes_on_window_close {
             for pane_group in self.tab_views() {
                 pane_group.update(ctx, |pane_group, ctx| {

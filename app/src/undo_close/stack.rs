@@ -1,4 +1,5 @@
 use uuid::Uuid;
+use warp_core::telemetry::TelemetryContextModel;
 use warp_errors::report_error;
 use warpui::r#async::SpawnedFutureHandle;
 use warpui::{
@@ -62,6 +63,11 @@ pub enum ClosedItem {
         tab_index: usize,
         data: TabData,
     },
+    LocalTab {
+        workspace: WeakViewHandle<Workspace>,
+        tab_index: usize,
+        pane_group: ViewHandle<PaneGroup>,
+    },
     Pane {
         data: PaneData,
     },
@@ -69,36 +75,43 @@ pub enum ClosedItem {
 
 impl ClosedItem {
     fn discard(self, ctx: &mut ModelContext<UndoCloseStack>) {
-        let history_model = BlocklistAIHistoryModel::handle(ctx);
-
         match self {
             ClosedItem::Window(data) => {
                 let ClosedWindowData { window_id, .. } = *data;
-                ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
-                    model.remove_focused_state_for_window(window_id, ctx);
-                });
+                if ctx.has_singleton_model::<ActiveAgentViewsModel>() {
+                    ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
+                        model.remove_focused_state_for_window(window_id, ctx);
+                    });
+                }
                 if let Some(workspace) = window_workspace(window_id, ctx) {
                     workspace.update(ctx, |workspace, ctx| {
                         for pane_group in workspace.tab_views() {
-                            // Mark conversations from all terminal panes in each tab
-                            Self::mark_conversations_historical_for_pane_group(
-                                pane_group,
-                                &history_model,
-                                ctx,
-                            );
+                            if ctx.has_singleton_model::<BlocklistAIHistoryModel>() {
+                                let history_model = BlocklistAIHistoryModel::handle(ctx);
+                                Self::mark_conversations_historical_for_pane_group(
+                                    pane_group,
+                                    &history_model,
+                                    ctx,
+                                );
+                            }
                             Self::clean_up_pane_group(pane_group, ctx);
                         }
                     });
                 }
             }
             ClosedItem::Tab { data, .. } => {
-                // Mark conversations from all terminal panes in the tab
-                Self::mark_conversations_historical_for_pane_group(
-                    &data.pane_group,
-                    &history_model,
-                    ctx,
-                );
+                if ctx.has_singleton_model::<BlocklistAIHistoryModel>() {
+                    let history_model = BlocklistAIHistoryModel::handle(ctx);
+                    Self::mark_conversations_historical_for_pane_group(
+                        &data.pane_group,
+                        &history_model,
+                        ctx,
+                    );
+                }
                 Self::clean_up_pane_group(&data.pane_group, ctx);
+            }
+            ClosedItem::LocalTab { pane_group, .. } => {
+                Self::clean_up_pane_group(&pane_group, ctx);
             }
             ClosedItem::Pane { data } => {
                 ctx.emit(UndoCloseStackEvent::DiscardPane(data.pane_id));
@@ -181,7 +194,11 @@ impl UndoCloseStack {
     pub fn is_pane_group_tab_in_stack(&self, pane_group_id: EntityId) -> bool {
         self.stack
             .iter()
-            .any(|undo_data| matches!(&undo_data.closed_item, ClosedItem::Tab { data, .. } if data.pane_group.id() == pane_group_id))
+            .any(|undo_data| match &undo_data.closed_item {
+                ClosedItem::Tab { data, .. } => data.pane_group.id() == pane_group_id,
+                ClosedItem::LocalTab { pane_group, .. } => pane_group.id() == pane_group_id,
+                _ => false,
+            })
     }
 
     /// Discards a pane group from the undo close stack early.
@@ -195,6 +212,7 @@ impl UndoCloseStack {
             .iter()
             .position(|undo_data| match &undo_data.closed_item {
                 ClosedItem::Tab { data, .. } => data.pane_group.id() == pane_group_id,
+                ClosedItem::LocalTab { pane_group, .. } => pane_group.id() == pane_group_id,
                 ClosedItem::Pane { data } => data.pane_group.id() == pane_group_id,
                 _ => false,
             })
@@ -230,6 +248,23 @@ impl UndoCloseStack {
         );
     }
 
+    pub fn handle_local_tab_closed(
+        &mut self,
+        workspace: WeakViewHandle<Workspace>,
+        tab_index: usize,
+        pane_group: ViewHandle<PaneGroup>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.push_item(
+            ClosedItem::LocalTab {
+                workspace,
+                tab_index,
+                pane_group,
+            },
+            ctx,
+        );
+    }
+
     /// Handles a pane being closed, adding the necessary data to the undo stack.
     pub fn handle_pane_closed_by_id(
         &mut self,
@@ -253,12 +288,14 @@ impl UndoCloseStack {
 
         match closed_item {
             ClosedItem::Window(data) => {
-                send_telemetry_from_app_ctx!(
-                    TelemetryEvent::UndoClose {
-                        item_type: UndoCloseItemType::Window,
-                    },
-                    ctx
-                );
+                if ctx.has_singleton_model::<TelemetryContextModel>() {
+                    send_telemetry_from_app_ctx!(
+                        TelemetryEvent::UndoClose {
+                            item_type: UndoCloseItemType::Window,
+                        },
+                        ctx
+                    );
+                }
 
                 let window_id = data.window_id;
                 ctx.reopen_closed_window(*data);
@@ -279,12 +316,14 @@ impl UndoCloseStack {
                 data,
             } => {
                 if let Some(workspace) = workspace.upgrade(ctx) {
-                    send_telemetry_from_app_ctx!(
-                        TelemetryEvent::UndoClose {
-                            item_type: UndoCloseItemType::Tab,
-                        },
-                        ctx
-                    );
+                    if ctx.has_singleton_model::<TelemetryContextModel>() {
+                        send_telemetry_from_app_ctx!(
+                            TelemetryEvent::UndoClose {
+                                item_type: UndoCloseItemType::Tab,
+                            },
+                            ctx
+                        );
+                    }
                     workspace.update(ctx, |workspace, ctx| {
                         workspace.restore_closed_tab(tab_index, data, ctx);
                     });
@@ -294,6 +333,20 @@ impl UndoCloseStack {
                 // Make sure we update our session restoration state now that the
                 // tab has been reopened.
                 ctx.dispatch_global_action("workspace:save_app", &());
+            }
+            ClosedItem::LocalTab {
+                workspace,
+                tab_index,
+                pane_group,
+            } => {
+                if let Some(workspace) = workspace.upgrade(ctx) {
+                    workspace.update(ctx, |workspace, ctx| {
+                        workspace.restore_closed_local_tab(tab_index, pane_group, ctx);
+                    });
+                    ctx.windows()
+                        .show_window_and_focus_app(workspace.window_id(ctx));
+                    ctx.dispatch_global_action("workspace:save_app", &());
+                }
             }
             ClosedItem::Pane { data } => {
                 if let Some(pane_group) = data.pane_group.upgrade(ctx) {
@@ -305,12 +358,14 @@ impl UndoCloseStack {
                     });
 
                     if restored {
-                        send_telemetry_from_app_ctx!(
-                            TelemetryEvent::UndoClose {
-                                item_type: UndoCloseItemType::Pane,
-                            },
-                            ctx
-                        );
+                        if ctx.has_singleton_model::<TelemetryContextModel>() {
+                            send_telemetry_from_app_ctx!(
+                                TelemetryEvent::UndoClose {
+                                    item_type: UndoCloseItemType::Pane,
+                                },
+                                ctx
+                            );
+                        }
 
                         // Focus the window first
                         ctx.windows().show_window_and_focus_app(window_id);

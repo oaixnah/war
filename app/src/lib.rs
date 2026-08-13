@@ -3,7 +3,7 @@
 mod ai;
 mod alloc;
 mod antivirus;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 mod app_menus;
 mod app_services;
 mod app_state;
@@ -189,6 +189,7 @@ use crate::ai::aws_credentials::AwsCredentialRefresher as _;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::geap_credentials::GeapCredentialRefresher as _;
 use crate::ai::mcp::{FileBasedMCPManager, FileMCPWatcher};
+use crate::channel::Channel;
 use crate::uri::web_intent_parser::maybe_rewrite_web_url_to_intent;
 use crate::view_components::DismissibleToast;
 pub mod workflows;
@@ -338,6 +339,13 @@ use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 pub static ASSETS: warp_assets::Assets = warp_assets::Assets;
 const TUI_SECURE_STORAGE_SERVICE_SUFFIX: &str = ".tui";
 
+/// Permanently disables inherited product networking and telemetry for a local War process.
+pub fn disable_local_app_networking_and_telemetry() {
+    http_client::disable_outbound_requests();
+    websocket::disable_outbound_connections();
+    warpui::telemetry::disable();
+}
+
 fn determine_agent_source(
     launch_mode: &LaunchMode,
 ) -> Option<crate::ai::ambient_agents::AgentSource> {
@@ -404,6 +412,7 @@ pub(crate) enum LaunchMode {
     Test {
         driver: Box<Option<TestDriver>>,
         is_integration_test: bool,
+        use_local_app: bool,
     },
 
     /// Remote server proxy — bridges SSH stdio to the daemon's Unix socket.
@@ -446,6 +455,18 @@ enum AuthInitialization {
 }
 
 impl LaunchMode {
+    fn is_local_war(&self) -> bool {
+        ChannelState::channel() == Channel::Oss
+            && matches!(
+                self,
+                LaunchMode::App { .. }
+                    | LaunchMode::Test {
+                        use_local_app: true,
+                        ..
+                    }
+            )
+    }
+
     fn args(&self) -> Cow<'_, warp_cli::AppArgs> {
         match self {
             LaunchMode::App { args, .. } => Cow::Borrowed(args),
@@ -590,7 +611,7 @@ impl LaunchMode {
     /// processes (daemon, CLI, proxy, TUI) would otherwise contend for the fixed port.
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     fn should_start_local_http_server(&self) -> bool {
-        !self.is_headless()
+        !self.is_local_war() && !self.is_headless()
     }
 
     /// Returns `true` if this process can build and sync codebase indices.
@@ -629,6 +650,9 @@ impl LaunchMode {
     /// Whether Sentry / crash reporting should be initialized.
     #[cfg_attr(not(feature = "crash_reporting"), allow(dead_code))]
     pub(crate) fn needs_crash_reporting(&self) -> bool {
+        if self.is_local_war() {
+            return false;
+        }
         match self {
             LaunchMode::App { .. }
             | LaunchMode::CommandLine { .. }
@@ -641,6 +665,9 @@ impl LaunchMode {
 
     /// Whether profiling and tracing should be initialized.
     pub(crate) fn needs_profiling(&self) -> bool {
+        if self.is_local_war() {
+            return false;
+        }
         match self {
             LaunchMode::App { .. }
             | LaunchMode::CommandLine { .. }
@@ -697,6 +724,7 @@ impl LaunchMode {
         LaunchMode::Test {
             driver: Box::new(None),
             is_integration_test: false,
+            use_local_app: false,
         }
     }
 }
@@ -916,6 +944,17 @@ pub fn run_integration_test(driver: TestDriver) -> Result<()> {
     let launch = LaunchMode::Test {
         driver: Box::new(Some(driver)),
         is_integration_test,
+        use_local_app: false,
+    };
+    run_internal(launch)
+}
+
+/// Runs an integration test through the production local War composition.
+pub fn run_local_app_integration_test(driver: TestDriver) -> Result<()> {
+    let launch = LaunchMode::Test {
+        driver: Box::new(Some(driver)),
+        is_integration_test: true,
+        use_local_app: true,
     };
     run_internal(launch)
 }
@@ -1176,13 +1215,17 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
     // The TUI front-end skips the GUI lifecycle callbacks, which reach for
     // windows and GUI-only state, but still flushes telemetry and reporting on
     // termination.
-    let callbacks = if matches!(launch_mode, LaunchMode::Tui { .. }) {
+    let callbacks = if launch_mode.is_local_war() {
+        local_app_callbacks(tracing_initialization.take())
+    } else if matches!(launch_mode, LaunchMode::Tui { .. }) {
         let mut tracing_initialization = tracing_initialization.take();
         warpui::platform::AppCallbacks {
             on_will_terminate: Some(Box::new(move |ctx| {
-                TelemetryCollector::handle(ctx).update(ctx, |telemetry_collector, ctx| {
-                    telemetry_collector.flush_telemetry_events_for_shutdown(ctx);
-                });
+                if ctx.has_singleton_model::<TelemetryCollector>() {
+                    TelemetryCollector::handle(ctx).update(ctx, |telemetry_collector, ctx| {
+                        telemetry_collector.flush_telemetry_events_for_shutdown(ctx);
+                    });
+                }
 
                 profiling::teardown();
                 if let Some(initialization) = tracing_initialization.as_mut() {
@@ -1326,13 +1369,17 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
         ctx.add_singleton_model(move |ctx| {
             plugin::PluginHost::new(ctx).expect("Could not instantiate PluginHost")
         });
-        let app_state = initialize_app(
-            &launch_mode,
-            timer,
-            startup_toml_parse_error,
-            ctx,
-            pre_sentry_errors,
-        );
+        let app_state = if launch_mode.is_local_war() {
+            initialize_local_app(timer, startup_toml_parse_error, ctx)
+        } else {
+            initialize_app(
+                &launch_mode,
+                timer,
+                startup_toml_parse_error,
+                ctx,
+                pre_sentry_errors,
+            )
+        };
 
         if ImprovedPaletteSearch::improved_search_enabled(ctx) {
             FeatureFlag::UseTantivySearch.set_enabled(true);
@@ -1447,6 +1494,238 @@ fn authenticate_user_after_iap_access(
     iap_manager.update(ctx, |manager, ctx| manager.ensure_access(ctx));
 }
 
+fn register_local_secure_storage(ctx: &mut AppContext) {
+    let service_name = ChannelState::data_domain();
+    cfg_if::cfg_if! {
+        if #[cfg(any(test, feature = "integration_tests"))] {
+            warpui_extras::secure_storage::register_noop(&service_name, ctx);
+        } else if #[cfg(any(target_os = "linux", target_os = "freebsd"))] {
+            warpui_extras::secure_storage::register_with_fallback(
+                &service_name,
+                warp_core::paths::state_dir(),
+                ctx,
+            );
+        } else if #[cfg(target_os = "windows")] {
+            warpui_extras::secure_storage::register_with_dir(
+                &service_name,
+                warp_core::paths::state_dir(),
+                ctx,
+            );
+        } else {
+            warpui_extras::secure_storage::register(&service_name, ctx);
+        }
+    }
+}
+
+/// Initializes the production dependency closure for the native, local War app.
+///
+/// This is intentionally separate from [`initialize_app`]: the hosted composition root starts by
+/// constructing network, authentication, telemetry, cloud, and update services which must never
+/// exist during local terminal startup.
+#[::tracing::instrument(skip_all)]
+pub(crate) fn initialize_local_app(
+    mut timer: IntervalTimer,
+    startup_toml_parse_error: Option<warpui_extras::user_preferences::Error>,
+    ctx: &mut AppContext,
+) -> Option<AppState> {
+    debug_assert_eq!(ChannelState::channel(), Channel::Oss);
+    register_local_secure_storage(ctx);
+
+    ensure_warp_watch_roots_exist();
+    ctx.add_singleton_model(WarpManagedPathsWatcher::new);
+    ctx.add_singleton_model(WarpConfig::new);
+    ctx.add_singleton_model(|_| SettingsManager::default());
+    let user_defaults = settings::init(startup_toml_parse_error, ctx);
+    timer.mark_interval_end("READ_USER_DEFAULTS_AND_INITIALIZE_SETTINGS");
+
+    if FeatureFlag::UIZoom.is_enabled() {
+        ctx.set_zoom_factor(WindowSettings::as_ref(ctx).zoom_level.as_zoom_factor());
+    }
+
+    ctx.add_singleton_model(|_| GPUState::new());
+    #[cfg(windows)]
+    ctx.add_singleton_model(util::traffic_lights::windows::RendererState::new);
+    PrivacySettings::register_local_singleton(ctx);
+
+    let (sqlite_data, writer_handles) = persistence::initialize(
+        ctx,
+        persistence::PersistenceScope::App,
+        persistence::PersistedDataScope::LocalApp,
+    );
+    timer.mark_interval_end("SQLITE_INITIALIZED");
+    let (app_state, command_history) = sqlite_data
+        .map(|data| (data.app_state, data.command_history))
+        .unwrap_or_default();
+    let persistence_writer = PersistenceWriter::new(writer_handles);
+    let model_event_sender = persistence_writer.sender();
+
+    let referral_theme_status = ctx.add_model(ReferralThemeStatus::new);
+    let tips_completed = ctx.add_model(|_| user_defaults.tips_data);
+    let user_default_shell_unsupported_banner_model_handle =
+        ctx.add_model(|_| user_defaults.user_default_shell_unsupported_banner_state);
+    ctx.add_singleton_model(move |_| {
+        GlobalResourceHandlesProvider::new(GlobalResourceHandles {
+            model_event_sender,
+            tips_completed,
+            referral_theme_status,
+            user_default_shell_unsupported_banner_model_handle,
+            settings_file_error: user_defaults.settings_file_error,
+        })
+    });
+
+    ctx.set_default_binding_validator(is_binding_cross_platform);
+    ctx.set_event_munger(move |event, ctx| {
+        let extra_meta_keys = *KeysSettings::as_ref(ctx).extra_meta_keys;
+        apply_extra_meta_keys(event, extra_meta_keys);
+        apply_scroll_multiplier(event, ctx);
+    });
+    ctx.set_a11y_verbosity(*AccessibilitySettings::as_ref(ctx).a11y_verbosity);
+
+    #[cfg(feature = "local_tty")]
+    terminal::available_shells::register(ctx);
+    ctx.add_singleton_model(|_| History::new(command_history));
+    ctx.add_singleton_model(|_| KeybindingChangedNotifier::new());
+    ctx.add_singleton_model(|_| VimRegisters::new());
+    ctx.add_singleton_model(|_| SyncedInputState::new());
+    ctx.add_singleton_model(LocalWorkflows::new);
+    ctx.add_singleton_model(move |_| IgnoredSuggestionsModel::new(Vec::new()));
+    ctx.add_singleton_model(Prompt::new);
+    ctx.add_singleton_model(|_| ResizableData::default());
+    ctx.add_singleton_model(|_| AudibleBell::new());
+    ctx.add_singleton_model(|_| ActiveSession::default());
+    ctx.add_singleton_model(UndoCloseStack::new);
+    #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
+    {
+        ctx.add_singleton_model(LocalShellState::new);
+        ctx.add_singleton_model(system::SystemInfo::new);
+    }
+
+    workspace::init(ctx);
+    pane_group::init(ctx);
+    terminal::init(ctx);
+    input::init(ctx);
+    editor::init(ctx);
+    root_view::init(ctx);
+    undo_close::init(ctx);
+    app_services::init(ctx);
+
+    ctx.add_global_action("app:toggle_user_ps1", move |_args: &(), ctx| {
+        SessionSettings::handle(ctx).update(ctx, |settings, ctx| {
+            report_if_error!(settings.honor_ps1.toggle_and_save_value(ctx));
+        });
+    });
+    ctx.add_global_action("app:toggle_copy_on_select", move |_args: &(), ctx| {
+        SelectionSettings::handle(ctx).update(ctx, |settings, ctx| {
+            report_if_error!(settings.copy_on_select.toggle_and_save_value(ctx));
+        });
+    });
+
+    ctx.add_singleton_model(move |_| persistence_writer);
+    timer.mark_interval_end("SINGLETON_MODELS_REGISTERED");
+    ctx.add_singleton_model(move |_| timer);
+    app_state
+}
+
+pub(crate) fn local_app_callbacks(
+    mut tracing_initialization: Option<tracing::Initialization>,
+) -> warpui::platform::AppCallbacks {
+    warpui::platform::AppCallbacks {
+        on_screen_changed: Some(Box::new(|ctx| {
+            ctx.dispatch_global_action(
+                "root_view:move_quake_mode_window_from_screen_change",
+                &KeysSettings::as_ref(ctx)
+                    .quake_mode_settings
+                    .value()
+                    .clone(),
+            );
+        })),
+        on_resigned_active: Some(Box::new(|ctx| {
+            let active_window_id = ctx.windows().active_window();
+            ctx.dispatch_global_action(
+                "root_view:update_quake_mode_state",
+                &UpdateQuakeModeEventArg { active_window_id },
+            );
+        })),
+        on_will_terminate: Some(Box::new(move |ctx| {
+            ctx.dispatch_global_action("workspace:save_app", &());
+            PersistenceWriter::handle(ctx).update(ctx, |writer, _| writer.terminate());
+
+            #[cfg(feature = "local_tty")]
+            terminal::local_tty::spawner::PtySpawner::handle(ctx).update(ctx, |pty_spawner, _| {
+                pty_spawner.prepare_for_app_termination()
+            });
+            #[cfg(all(feature = "local_tty", windows))]
+            terminal::local_tty::shutdown_all_pty_event_loops(ctx);
+
+            app_services::teardown(ctx);
+            profiling::teardown();
+            if let Some(initialization) = tracing_initialization.as_mut() {
+                initialization.shutdown();
+            }
+            #[cfg(feature = "crash_reporting")]
+            crash_reporting::uninit_sentry();
+        })),
+        on_should_close_window: Some(Box::new(|_, ctx| {
+            let quit_on_last_window_closed =
+                cfg!(any(target_os = "linux", target_os = "freebsd", windows))
+                    || *GeneralSettings::as_ref(ctx).quit_on_last_window_closed;
+            if ctx.window_ids().count() == 1 && quit_on_last_window_closed {
+                ctx.terminate_app(TerminationMode::Cancellable, None);
+                ApproveTerminateResult::Cancel
+            } else {
+                ApproveTerminateResult::Terminate
+            }
+        })),
+        on_should_terminate_app: Some(Box::new(|_, _| ApproveTerminateResult::Terminate)),
+        on_disable_warning_modal: Some(Box::new(|ctx| {
+            GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+                report_if_error!(
+                    settings
+                        .show_warning_before_quitting
+                        .toggle_and_save_value(ctx)
+                );
+            });
+        })),
+        on_new_window_requested: Some(Box::new(|ctx| {
+            App::record_last_active_timestamp();
+            ctx.dispatch_global_action("root_view:open_new", &());
+            ctx.dispatch_global_action("workspace:save_app", &());
+        })),
+        on_open_urls: Some(Box::new(|urls, _| {
+            for _ in urls {
+                reject_local_app_incoming_uri();
+            }
+        })),
+        on_os_appearance_changed: Some(Box::new(|ctx| {
+            AppearanceManager::handle(ctx).update(ctx, |manager, ctx| {
+                manager.refresh_theme_state(ctx);
+            });
+        })),
+        on_active_window_changed: Some(Box::new(|ctx| {
+            let active_window_id = ctx.windows().active_window();
+            if !ctx.windows().key_window_is_modal_panel() {
+                ctx.dispatch_global_action(
+                    "root_view:update_quake_mode_state",
+                    &UpdateQuakeModeEventArg { active_window_id },
+                );
+            }
+            ctx.dispatch_global_action("workspace:save_app", &());
+        })),
+        on_window_will_close: Some(Box::new(|_, ctx| {
+            if ctx.windows().stage() != ApplicationStage::Terminating {
+                ctx.dispatch_global_action("workspace:save_app", &());
+            }
+        })),
+        on_window_moved: Some(Box::new(|ctx| {
+            ctx.dispatch_global_action("workspace:save_app", &());
+        })),
+        on_window_resized: Some(Box::new(|ctx| {
+            ctx.dispatch_global_action("workspace:save_app", &());
+        })),
+        ..Default::default()
+    }
+}
+
 #[::tracing::instrument(skip_all, fields(tags.cloud_agent = true))]
 pub(crate) fn initialize_app(
     launch_mode: &LaunchMode,
@@ -1501,6 +1780,9 @@ pub(crate) fn initialize_app(
     }
 
     let (auth_state, pending_api_key) = match launch_mode.auth_initialization() {
+        AuthInitialization::Persisted if ChannelState::channel() == Channel::Oss => {
+            (AuthState::initialize_local(), None)
+        }
         AuthInitialization::Persisted => (AuthState::initialize(ctx), None),
         AuthInitialization::PendingApiKey(api_key) => (
             AuthState::initialize_for_credential_validation(ctx),
@@ -1791,23 +2073,28 @@ pub(crate) fn initialize_app(
 
     cfg_if::cfg_if! {
         if #[cfg(feature = "crash_reporting")] {
-            let is_crash_reporting_enabled = crash_reporting::init(ctx);
+            let is_crash_reporting_enabled = launch_mode.needs_crash_reporting()
+                && crash_reporting::init(ctx);
         } else {
             let is_crash_reporting_enabled = false;
         }
     }
     // Send buffered pre-init errors to Sentry now that the client is ready.
     #[cfg(feature = "crash_reporting")]
-    for err in _pre_sentry_errors {
-        sentry::integrations::anyhow::capture_anyhow(&err);
+    if is_crash_reporting_enabled {
+        for err in _pre_sentry_errors {
+            sentry::integrations::anyhow::capture_anyhow(&err);
+        }
     }
     timer.mark_interval_end("INIT_CRASH_REPORTING");
 
-    if let LaunchMode::App { .. } = launch_mode {
+    if !launch_mode.is_local_war() && matches!(launch_mode, LaunchMode::App { .. }) {
         autoupdate::check_and_report_update_errors(ctx);
     }
 
-    ctx.set_fallback_font_source_provider(|url| ::asset_cache::url_source(url));
+    if !launch_mode.is_local_war() {
+        ctx.set_fallback_font_source_provider(|url| ::asset_cache::url_source(url));
+    }
 
     ctx.set_default_binding_validator(is_binding_cross_platform);
 
@@ -1821,7 +2108,8 @@ pub(crate) fn initialize_app(
     // not mutate that bundle. The bundled CLI runs the GUI executable from
     // inside `Warp.app`, so without this it would rewrite a bundle it does not
     // own. See APP-2946.
-    if FeatureFlag::Autoupdate.is_enabled()
+    if !launch_mode.is_local_war()
+        && FeatureFlag::Autoupdate.is_enabled()
         && AppExecutionMode::as_ref(ctx).can_autoupdate()
         && let Err(e) = autoupdate::remove_old_executable()
     {
@@ -1874,7 +2162,9 @@ pub(crate) fn initialize_app(
     #[cfg(not(target_family = "wasm"))]
     ctx.add_singleton_model(remote_server::codebase_index_model::RemoteCodebaseIndexModel::new);
     #[cfg(not(target_family = "wasm"))]
-    remote_server::wire_auth_token_rotation(ctx);
+    if !launch_mode.is_local_war() {
+        remote_server::wire_auth_token_rotation(ctx);
+    }
 
     log::info!(
         "Starting warp with channel state {} and version {:?}",
@@ -1951,7 +2241,7 @@ pub(crate) fn initialize_app(
                 crash_recovery.on_frame_drawn(window_id, ctx);
             });
         })
-    } else {
+    } else if !launch_mode.is_local_war() {
         // If the app was opened while logged out, record an event for measuring new users.
         // This is sent immediately in case they quit the app on the signup screen.
         send_telemetry_sync_from_app_ctx!(TelemetryEvent::LoggedOutStartup, ctx);
@@ -1988,7 +2278,10 @@ pub(crate) fn initialize_app(
     {
         let imported_config_model = ctx.add_singleton_model(ImportedConfigModel::new);
 
-        if ChannelState::channel() != warp_core::channel::Channel::Integration {
+        if !matches!(
+            ChannelState::channel(),
+            warp_core::channel::Channel::Integration | Channel::Oss
+        ) {
             imported_config_model.update(ctx, |model, ctx| {
                 model.search_for_settings_to_import(ctx);
             });
@@ -2050,12 +2343,14 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(CustomSecretRegexUpdater::new);
 
     // Register the `TelemetryCollection` singleton model.
-    let server_api_clone = server_api.clone();
-    ctx.add_singleton_model(|ctx| {
-        let telemetry_collector = TelemetryCollector::new(server_api_clone);
-        telemetry_collector.initialize_telemetry_collection(ctx);
-        telemetry_collector
-    });
+    if ChannelState::channel() != Channel::Oss {
+        let server_api_clone = server_api.clone();
+        ctx.add_singleton_model(|ctx| {
+            let telemetry_collector = TelemetryCollector::new(server_api_clone);
+            telemetry_collector.initialize_telemetry_collection(ctx);
+            telemetry_collector
+        });
+    }
     timer.mark_interval_end("INITIALIZE_TELEMETRY_COLLECTION");
 
     // Register initial keybindings prior to creating menus
@@ -2343,12 +2638,14 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(NotebookKeybindings::new);
     ctx.add_singleton_model(TerminalKeybindings::new);
     ctx.add_singleton_model(|_| ActiveSession::default());
-    ctx.add_singleton_model(|ctx| {
-        Listener::new(
-            server_api_provider.as_ref(ctx).get_cloud_objects_client(),
-            ctx,
-        )
-    });
+    if ChannelState::channel() != Channel::Oss {
+        ctx.add_singleton_model(|ctx| {
+            Listener::new(
+                server_api_provider.as_ref(ctx).get_cloud_objects_client(),
+                ctx,
+            )
+        });
+    }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     {
@@ -2586,10 +2883,12 @@ pub(crate) fn initialize_app(
         });
     }
     #[cfg(feature = "local_fs")]
-    if matches!(
-        launch_mode,
-        LaunchMode::App { .. } | LaunchMode::Test { .. }
-    ) && FeatureFlag::WarpControlCli.is_enabled()
+    if ChannelState::channel() != Channel::Oss
+        && matches!(
+            launch_mode,
+            LaunchMode::App { .. } | LaunchMode::Test { .. }
+        )
+        && FeatureFlag::WarpControlCli.is_enabled()
     {
         ctx.add_singleton_model(local_control::LocalControlBridge::new);
         ctx.add_singleton_model(local_control::LocalControlServer::new);
@@ -2684,9 +2983,11 @@ pub(crate) fn app_callbacks(
                 auth_state.user_id().map(|uid| uid.as_string()),
                 auth_state.anonymous_id(),
             );
-            TelemetryCollector::handle(ctx).update(ctx, |telemetry_collector, ctx| {
-                telemetry_collector.flush_telemetry_events_for_shutdown(ctx);
-            });
+            if ctx.has_singleton_model::<TelemetryCollector>() {
+                TelemetryCollector::handle(ctx).update(ctx, |telemetry_collector, ctx| {
+                    telemetry_collector.flush_telemetry_events_for_shutdown(ctx);
+                });
+            }
 
             // Shutdown all LSP servers gracefully before app termination
             lsp::LspManagerModel::handle(ctx).update(ctx, |manager, ctx| {
@@ -2710,7 +3011,9 @@ pub(crate) fn app_callbacks(
             // ensure that the new process doesn't find the old process while
             // attempting to enforce our single-instance policy on Linux.
             app_services::teardown(ctx);
-            autoupdate::spawn_child_if_necessary(ctx);
+            if ChannelState::channel() != Channel::Oss {
+                autoupdate::spawn_child_if_necessary(ctx);
+            }
 
             // Tear down any application profilers that are running, writing
             // results to disk.
@@ -2798,12 +3101,13 @@ pub(crate) fn app_callbacks(
 
             // If there's a pending autoupdate, apply that before showing the unsaved changes
             // dialog. We apply the update first so that the dialog can force-terminate.
-            let applying_update = autoupdate::apply_pending_update(ctx, |ctx| {
-                // Once the deferred update is applied, re-terminate the app. This termination is
-                // cancellable so that we still show the unsaved changes dialog.
-                log::info!("Deferred autoupdate applied, terminating app");
-                ctx.terminate_app(TerminationMode::Cancellable, None);
-            });
+            let applying_update = ChannelState::channel() != Channel::Oss
+                && autoupdate::apply_pending_update(ctx, |ctx| {
+                    // Once the deferred update is applied, re-terminate the app. This termination is
+                    // cancellable so that we still show the unsaved changes dialog.
+                    log::info!("Deferred autoupdate applied, terminating app");
+                    ctx.terminate_app(TerminationMode::Cancellable, None);
+                });
             if applying_update {
                 return ApproveTerminateResult::Cancel;
             }
@@ -3062,6 +3366,19 @@ fn is_cloud_agent_web_home_launch_url(url: &Url) -> bool {
             .any(|(key, value)| key == "source" && value == "web_home")
 }
 
+fn reject_local_app_incoming_uri() {
+    log::warn!("Ignoring incoming URL because local War does not support URI actions");
+}
+
+fn should_skip_restore_for_launch(launch_mode: &LaunchMode) -> bool {
+    !launch_mode.is_local_war()
+        && launch_mode
+            .args()
+            .urls
+            .iter()
+            .any(is_cloud_agent_web_home_launch_url)
+}
+
 #[::tracing::instrument(skip_all, fields(tags.cloud_agent = true))]
 fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode: LaunchMode) {
     IntervalTimer::handle(ctx).update(ctx, |timer, _ctx| {
@@ -3083,11 +3400,8 @@ fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode
         // before reaching launch().
         LaunchMode::Tui { .. } => unreachable!("LaunchMode::Tui is handled before launch()"),
         LaunchMode::App { .. } | LaunchMode::Test { .. } => {
-            let should_skip_restore = launch_mode
-                .args()
-                .urls
-                .iter()
-                .any(is_cloud_agent_web_home_launch_url);
+            let is_local_war = launch_mode.is_local_war();
+            let should_skip_restore = should_skip_restore_for_launch(&launch_mode);
             let app_state = if should_skip_restore { None } else { app_state };
             // Attempt to restore windows from the persisted application state.
             let arg = OpenFromRestoredArg { app_state };
@@ -3096,7 +3410,11 @@ fn launch(ctx: &mut warpui::AppContext, app_state: Option<AppState>, launch_mode
             // Process any URLs that were provided on the command line (which may be
             // file:// URLs or ones using our custom URL scheme).
             for url in launch_mode.args().urls.iter() {
-                uri::handle_incoming_uri(url, ctx);
+                if is_local_war {
+                    reject_local_app_incoming_uri();
+                } else {
+                    uri::handle_incoming_uri(url, ctx);
+                }
             }
 
             // If, after session restoration and command-line argument handling, we

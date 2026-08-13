@@ -46,7 +46,7 @@ pub struct InlineMenuPositioner {
     window_id: WindowId,
     should_render_below_input: bool,
     suggestions_mode_model: ModelHandle<InputSuggestionsModeModel>,
-    agent_view_controller: ModelHandle<AgentViewController>,
+    agent_view_controller: Option<ModelHandle<AgentViewController>>,
     /// Per-menu custom content heights, set by resize.
     custom_content_heights: HashMap<InlineMenuType, f32>,
 }
@@ -68,7 +68,11 @@ impl InlineMenuPositioner {
         ctx.subscribe_to_model(suggestions_mode_model, |me, _, _, ctx| {
             let suggestions_mode_model = me.suggestions_mode_model.as_ref(ctx);
             if suggestions_mode_model.is_inline_menu_open() {
-                if me.agent_view_controller.as_ref(ctx).is_active() {
+                if me
+                    .agent_view_controller
+                    .as_ref()
+                    .is_some_and(|controller| controller.as_ref(ctx).is_active())
+                {
                     me.should_render_below_input = false;
                 } else {
                     match *InputModeSettings::as_ref(ctx).input_mode {
@@ -100,8 +104,32 @@ impl InlineMenuPositioner {
             input_save_position_id,
             window_id,
             suggestions_mode_model: suggestions_mode_model.clone(),
-            agent_view_controller: agent_view_controller.clone(),
+            agent_view_controller: Some(agent_view_controller.clone()),
             should_render_below_input: false,
+            custom_content_heights: persisted_heights,
+        }
+    }
+
+    pub fn new_local(
+        suggestions_mode_model: &ModelHandle<InputSuggestionsModeModel>,
+        terminal_content_position_id: String,
+        input_save_position_id: String,
+        size_info: SizeInfo,
+        window_id: WindowId,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
+        let persisted_heights = InputSettings::as_ref(ctx)
+            .inline_menu_custom_content_heights
+            .value()
+            .clone();
+        Self {
+            size_info,
+            terminal_content_position_id,
+            input_save_position_id,
+            window_id,
+            should_render_below_input: false,
+            suggestions_mode_model: suggestions_mode_model.clone(),
+            agent_view_controller: None,
             custom_content_heights: persisted_heights,
         }
     }
@@ -219,7 +247,11 @@ impl InlineMenuPositioner {
         } else {
             0.
         };
-        if self.agent_view_controller.as_ref(app).is_active() {
+        if self
+            .agent_view_controller
+            .as_ref()
+            .is_some_and(|controller| controller.as_ref(app).is_active())
+        {
             header_height
         } else {
             header_height + standard_message_bar_height(app) + INLINE_MENU_BORDER_WIDTH

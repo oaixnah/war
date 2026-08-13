@@ -28,7 +28,7 @@ use warpui::{
 
 use super::ai_queries::AIQueriesDataSource;
 use super::env_var_collections::EnvVarCollectionDataSource;
-use super::history::history_data_source_for_session;
+use super::history::{history_data_source_for_session, local_history_data_source_for_session};
 use super::notebooks::notebooks_data_source;
 use super::warp_ai::WarpAIDataSource;
 use super::workflows::{WorkflowsDataSource, cloud_workflows_data_source};
@@ -121,8 +121,9 @@ pub struct CommandSearchView {
     zero_state_handle: ViewHandle<CommandSearchZeroStateView>,
     handle: WeakViewHandle<Self>,
     menu_positioning: MenuPositioning,
-    auth_state: Arc<AuthState>,
-    ai_client: Arc<dyn AIClient>,
+    auth_state: Option<Arc<AuthState>>,
+    ai_client: Option<Arc<dyn AIClient>>,
+    local_history_only: bool,
     state: CommandSearchViewState,
     visible_results_range_sender: Sender<Range<usize>>,
     resizable_state_handle: ResizableStateHandle,
@@ -134,6 +135,24 @@ pub struct CommandSearchView {
 
 impl CommandSearchView {
     pub fn new(ai_client: Arc<dyn AIClient>, ctx: &mut ViewContext<Self>) -> Self {
+        Self::new_inner(
+            Some(ai_client),
+            Some(AuthStateProvider::as_ref(ctx).get().clone()),
+            false,
+            ctx,
+        )
+    }
+
+    pub fn new_local(ctx: &mut ViewContext<Self>) -> Self {
+        Self::new_inner(None, None, true, ctx)
+    }
+
+    fn new_inner(
+        ai_client: Option<Arc<dyn AIClient>>,
+        auth_state: Option<Arc<AuthState>>,
+        local_history_only: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> Self {
         let search_bar_state =
             ctx.add_model(|_| SearchBarState::new(SearchResultOrdering::BottomUp));
 
@@ -196,8 +215,9 @@ impl CommandSearchView {
             });
 
         Self {
-            auth_state: AuthStateProvider::as_ref(ctx).get().clone(),
+            auth_state,
             ai_client,
+            local_history_only,
             zero_state_handle,
             menu_positioning: Default::default(),
             handle: ctx.handle(),
@@ -227,16 +247,35 @@ impl CommandSearchView {
         self.mixer.update(ctx, |mixer, ctx| {
             mixer.reset(ctx);
 
+            if self.local_history_only {
+                let source = History::handle(ctx).read(ctx, |history_model, _| {
+                    local_history_data_source_for_session(session_id, history_model)
+                });
+                mixer.add_async_source(
+                    source,
+                    HashSet::from([QueryFilter::History]),
+                    AddAsyncSourceOptions {
+                        debounce_interval: Some(Duration::from_millis(50)),
+                        run_in_zero_state: true,
+                        run_when_unfiltered: true,
+                    },
+                    ctx,
+                );
+                return;
+            }
+
             // Add data sources in lowest->highest priority order.  If results from two
             // data sources produce the same ranking score, the data source added first
             // will show up higher in the list (i.e.: further away from the input).
-            if AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
+            if AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
+                && let Some(ai_client) = &self.ai_client
+            {
                 mixer.add_sync_source(
-                    WarpAIDataSource::new(self.ai_client.clone(), None),
+                    WarpAIDataSource::new(ai_client.clone(), None),
                     HashSet::from([QueryFilter::NaturalLanguage]),
                 );
                 mixer.add_async_source(
-                    WarpAIDataSource::new(self.ai_client.clone(), ai_execution_context),
+                    WarpAIDataSource::new(ai_client.clone(), ai_execution_context),
                     HashSet::from([QueryFilter::NaturalLanguage]),
                     AddAsyncSourceOptions {
                         debounce_interval: Some(Duration::from_millis(50)),
@@ -592,10 +631,18 @@ impl CommandSearchView {
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         if is_ratelimit_error {
-            let current_user_id = self.auth_state.user_id().unwrap_or_default();
+            let current_user_id = self
+                .auth_state
+                .as_ref()
+                .and_then(|auth_state| auth_state.user_id())
+                .unwrap_or_default();
             if let Some(team) = UserWorkspaces::as_ref(app).team_for_view_handle(&self.handle, app)
             {
-                let current_user_email = self.auth_state.user_email().unwrap_or_default();
+                let current_user_email = self
+                    .auth_state
+                    .as_ref()
+                    .and_then(|auth_state| auth_state.user_email())
+                    .unwrap_or_default();
                 let has_admin_permissions = team.has_admin_permissions(&current_user_email);
                 if team.billing_metadata.can_upgrade_to_higher_tier_plan() {
                     if has_admin_permissions {

@@ -38,6 +38,9 @@ impl SingletonEntity for SystemStats {}
 
 #[cfg(not(target_family = "wasm"))]
 pub fn long_os_version(ctx: &warpui::AppContext) -> Option<String> {
+    if !ctx.has_singleton_model::<SystemInfo>() {
+        return None;
+    }
     crate::system::SystemInfo::as_ref(ctx)
         .long_os_version()
         .map(ToOwned::to_owned)

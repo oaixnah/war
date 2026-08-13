@@ -3,6 +3,7 @@ use onboarding::{
     AgentOnboardingView, OfferVariant, OnboardingAuthState, OnboardingIntention, SelectedSettings,
     UICustomizationSettings,
 };
+use warp_core::channel::Channel;
 use warp_core::features::FeatureFlag;
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::elements::Empty;
@@ -14,8 +15,9 @@ use warpui::{
 use super::{
     AccountFirstCompletion, AuthOnboardingState, AuthOnboardingTarget,
     HAS_COMPLETED_ONBOARDING_KEY, NewWorkspaceSource, RootView, WorkspaceArgs,
-    has_completed_local_onboarding, offer_variant_for_account_class,
+    has_completed_local_onboarding, is_native_oss, offer_variant_for_account_class,
     refresh_pending_onboarding_choices, requires_post_onboarding_login,
+    should_open_terminal_directly,
 };
 use crate::GlobalResourceHandles;
 use crate::appearance::Appearance;
@@ -34,6 +36,26 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(|_ctx| ServerApiProvider::new_for_test());
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
     app.add_singleton_model(AuthManager::new_for_test);
+}
+
+#[test]
+fn native_war_always_opens_the_local_terminal() {
+    assert!(is_native_oss(Channel::Oss, false));
+    assert!(!is_native_oss(Channel::Oss, true));
+    assert!(!is_native_oss(Channel::Stable, false));
+    assert!(should_open_terminal_directly(Channel::Oss, false, false));
+    assert!(should_open_terminal_directly(Channel::Oss, false, true));
+    assert!(!should_open_terminal_directly(Channel::Oss, true, false));
+}
+
+#[test]
+fn inherited_channels_keep_their_existing_auth_gate() {
+    assert!(!should_open_terminal_directly(
+        Channel::Stable,
+        false,
+        false
+    ));
+    assert!(should_open_terminal_directly(Channel::Stable, false, true));
 }
 
 #[test]

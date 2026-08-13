@@ -496,6 +496,7 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
                 AISettings::as_ref(app)
                     .git_operations_autogen_enabled_internal
                     .is_supported_on_current_platform()
+                    && app.has_singleton_model::<UserWorkspaces>()
                     && UserWorkspaces::as_ref(app).is_git_operations_ai_enabled(),
             ),
         ],
@@ -657,8 +658,9 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
             )
             .with_group(bindings::BindingGroup::WarpAi)
             .is_supported_on_current_platform(
-                UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app)
-                    || UserWorkspaces::as_ref(app).is_custom_inference_enabled(app),
+                app.has_singleton_model::<UserWorkspaces>()
+                    && (UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app)
+                        || UserWorkspaces::as_ref(app).is_custom_inference_enabled(app)),
             ),
             ToggleSettingActionPair::new(
                 "auto show or hide Rich Input based on agent status",

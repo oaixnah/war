@@ -1,13 +1,13 @@
 #!/bin/bash
 #
 # macOS-specific implementation of `./script/run`. Runs a local version of
-# Warp as a real 'app' instead of a bare executable, so macOS can treat it
+# War as a real 'app' instead of a bare executable, so macOS can treat it
 # like a real signed app (custom URL schemes, user notifications, etc.).
 #
 # This script is invoked by `./script/run`, which handles cross-platform
-# setup (install_channel_config, binary name detection, feature-to-env-var
-# mapping). The following env vars are expected to be set by the caller:
-#   WARP_BIN_NAME  — "warp" (internal local build) or "warp-oss"
+# setup (binary name selection and feature-to-env-var mapping). The following
+# env vars are expected to be set by the caller:
+#   WARP_BIN_NAME  - "war" (OSS War build) or an explicitly selected inherited binary
 #   WARP_CHANNEL   — "local" or "oss"
 #   FEATURES       — comma-separated cargo features (already normalized)
 # Must be called from the root directory of the warp repo.
@@ -33,8 +33,8 @@ if [ "$WARP_CHANNEL" = "local" ]; then
     WARP_APP_PATH="${TARGET_DIR}/debug/bundle/osx/WarpLocal.app"
     WARP_SCHEME_NAME="warplocal"
 else
-    WARP_APP_PATH="${TARGET_DIR}/debug/bundle/osx/WarpOss.app"
-    WARP_SCHEME_NAME="warposs"
+    WARP_APP_PATH="${TARGET_DIR}/debug/bundle/osx/War.app"
+    WARP_SCHEME_NAME="war"
 fi
 DONT_OPEN=false
 # Launches the binary with "open", meaning the Warp process is
@@ -70,7 +70,7 @@ while (( "$#" )); do
       if [ "$WARP_CHANNEL" = "local" ]; then
           WARP_APP_PATH="${TARGET_DIR}/release/bundle/osx/WarpLocal.app"
       else
-          WARP_APP_PATH="${TARGET_DIR}/release/bundle/osx/WarpOss.app"
+          WARP_APP_PATH="${TARGET_DIR}/release/bundle/osx/War.app"
       fi
       PARAMS="$PARAMS $1"
       shift
@@ -81,7 +81,7 @@ while (( "$#" )); do
       if [ "$WARP_CHANNEL" = "local" ]; then
           WARP_APP_PATH="${TARGET_DIR}/${PROFILE}/bundle/osx/WarpLocal.app"
       else
-          WARP_APP_PATH="${TARGET_DIR}/${PROFILE}/bundle/osx/WarpOss.app"
+          WARP_APP_PATH="${TARGET_DIR}/${PROFILE}/bundle/osx/War.app"
       fi
       PARAMS="$PARAMS --profile $PROFILE"
       ;;
@@ -118,7 +118,14 @@ fi
 
 export WARP_SCHEME_NAME
 export WARP_PLIST_PATH="$WARP_APP_PATH/Contents/Info.plist"
+if [ "$WARP_CHANNEL" = "oss" ]; then
+  export WARP_PRODUCT_NAME="War"
+  export WARP_PLIST_NO_FILE_TYPES=1
+fi
 ./script/update_plist
+if [ "$WARP_CHANNEL" = "oss" ]; then
+  bash "${REPO_ROOT}/script/macos/test_war_bundle_identity" "$WARP_APP_PATH"
+fi
 
 echo "Preparing bundled resources..."
 if [ "${GENERATE_SCHEMA:-false}" != "true" ]; then
@@ -153,10 +160,10 @@ if [ "$DONT_OPEN" = false ] ; then
         if [ "$WARP_CHANNEL" = "local" ]; then
             LOG_FILE=~/Library/Logs/warp_local.log
         elif [ "$WARP_CHANNEL" = "oss" ]; then
-            LOG_FILE=~/Library/Logs/warp-oss.log
+            LOG_FILE=~/Library/Logs/war.log
         else
-            echo "Warning: unrecognized WARP_CHANNEL '$WARP_CHANNEL', defaulting to OSS log path" >&2
-            LOG_FILE=~/Library/Logs/warp-oss.log
+            echo "Warning: unrecognized WARP_CHANNEL '$WARP_CHANNEL', defaulting to War log path" >&2
+            LOG_FILE=~/Library/Logs/war.log
         fi
         tail -F "$LOG_FILE"
     else

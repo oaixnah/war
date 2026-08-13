@@ -193,6 +193,10 @@ impl Entity for TelemetryBanner {
 /// require this check, but an event that logs the input buffer for natural language detection
 /// _does_ need to check this.
 pub fn should_collect_ai_ugc_telemetry(app: &AppContext, is_telemetry_enabled: bool) -> bool {
+    if !app.has_singleton_model::<UserWorkspaces>() {
+        return false;
+    }
+
     match UserWorkspaces::as_ref(app).get_ugc_collection_enablement_setting() {
         UgcCollectionEnablementSetting::Disable => false,
         UgcCollectionEnablementSetting::Enable => true,

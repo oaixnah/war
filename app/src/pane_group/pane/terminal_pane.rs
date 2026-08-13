@@ -274,24 +274,33 @@ impl PaneContent for TerminalPane {
             group.send_sync_event_to_session(terminal_pane_id, &event, ctx);
         }
 
-        let terminal_view_id = self.terminal_view(ctx).id();
-        let manager_model = Manager::handle(ctx);
-        ctx.subscribe_to_model(&manager_model, move |group, model_handle, event, ctx| {
-            if let ManagerEvent::JoinedSession {
-                session_id: _,
-                view_id,
-            } = event
-            {
-                // only take action if the view id is ours
-                if *view_id == terminal_view_id {
-                    let url = retrieve_shared_session_link(model_handle.as_ref(ctx), view_id);
-                    group.handle_pane_link_updated(terminal_pane_id.into(), url, ctx);
-                }
-            }
+        let enable_hosted_integrations = group.server_api.is_some();
+        self.view.update(ctx, |view, ctx| {
+            view.header().update(ctx, |header, ctx| {
+                header.set_sharing_enabled(enable_hosted_integrations, ctx);
+            });
         });
 
+        let terminal_view_id = self.terminal_view(ctx).id();
+        if enable_hosted_integrations {
+            let manager_model = Manager::handle(ctx);
+            ctx.subscribe_to_model(&manager_model, move |group, model_handle, event, ctx| {
+                if let ManagerEvent::JoinedSession {
+                    session_id: _,
+                    view_id,
+                } = event
+                {
+                    // only take action if the view id is ours
+                    if *view_id == terminal_view_id {
+                        let url = retrieve_shared_session_link(model_handle.as_ref(ctx), view_id);
+                        group.handle_pane_link_updated(terminal_pane_id.into(), url, ctx);
+                    }
+                }
+            });
+        }
+
         #[cfg(feature = "local_fs")]
-        {
+        if enable_hosted_integrations {
             ctx.subscribe_to_model(
                 &BlocklistAIHistoryModel::handle(ctx),
                 move |group, _, event, ctx| {
@@ -321,61 +330,63 @@ impl PaneContent for TerminalPane {
             );
         }
 
-        // Store the pane group entity ID on the agent view controller so the
-        // message bar can perform pane-group-scoped visibility checks.
-        let pane_group_id = ctx.view_id();
-        let terminal_view = self.terminal_view(ctx);
-        let agent_view_controller = terminal_view.as_ref(ctx).agent_view_controller().clone();
-        agent_view_controller.update(ctx, |controller, _ctx| {
-            controller.set_pane_group_id(pane_group_id);
-        });
-        ctx.subscribe_to_model(&agent_view_controller, move |group, _, event, ctx| {
-            if let AgentViewControllerEvent::EnteredAgentView {
-                conversation_id,
-                display_mode,
-                ..
-            } = event
-                && display_mode.is_fullscreen()
-            {
-                group.restore_missing_child_agent_panes_for_parent(
-                    *conversation_id,
-                    terminal_pane_id.into(),
+        if enable_hosted_integrations {
+            // Store the pane group entity ID on the agent view controller so the
+            // message bar can perform pane-group-scoped visibility checks.
+            let pane_group_id = ctx.view_id();
+            let terminal_view = self.terminal_view(ctx);
+            let agent_view_controller = terminal_view.as_ref(ctx).agent_view_controller().clone();
+            agent_view_controller.update(ctx, |controller, _ctx| {
+                controller.set_pane_group_id(pane_group_id);
+            });
+            ctx.subscribe_to_model(&agent_view_controller, move |group, _, event, ctx| {
+                if let AgentViewControllerEvent::EnteredAgentView {
+                    conversation_id,
+                    display_mode,
+                    ..
+                } = event
+                    && display_mode.is_fullscreen()
+                {
+                    group.restore_missing_child_agent_panes_for_parent(
+                        *conversation_id,
+                        terminal_pane_id.into(),
+                        ctx,
+                    );
+                }
+            });
+            let active_session = terminal_view.as_ref(ctx).active_session().clone();
+            let active_stack_view = pane_stack.as_ref(ctx).active_view().clone();
+            let active_ambient_session_registration = active_stack_view
+                .as_ref(ctx)
+                .ambient_agent_task_id_for_details_panel(ctx)
+                .map(|task_id| (active_stack_view.id(), task_id));
+            ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
+                model.register_agent_view_controller(
+                    &agent_view_controller,
+                    &active_session,
+                    terminal_view_id,
                     ctx,
                 );
-            }
-        });
-        let active_session = terminal_view.as_ref(ctx).active_session().clone();
-        let active_stack_view = pane_stack.as_ref(ctx).active_view().clone();
-        let active_ambient_session_registration = active_stack_view
-            .as_ref(ctx)
-            .ambient_agent_task_id_for_details_panel(ctx)
-            .map(|task_id| (active_stack_view.id(), task_id));
-        ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
-            model.register_agent_view_controller(
-                &agent_view_controller,
-                &active_session,
-                terminal_view_id,
-                ctx,
-            );
-            if let Some((terminal_view_id, task_id)) = active_ambient_session_registration {
-                model.register_ambient_session(terminal_view_id, task_id, ctx);
-            }
-        });
+                if let Some((terminal_view_id, task_id)) = active_ambient_session_registration {
+                    model.register_ambient_session(terminal_view_id, task_id, ctx);
+                }
+            });
+        }
     }
 
-    fn detach(
-        &self,
-        _group: &PaneGroup,
-        detach_type: DetachType,
-        ctx: &mut ViewContext<PaneGroup>,
-    ) {
+    fn detach(&self, group: &PaneGroup, detach_type: DetachType, ctx: &mut ViewContext<PaneGroup>) {
+        let enable_hosted_integrations = group.server_api.is_some();
         if matches!(detach_type, DetachType::Closed) {
             // Only immediately clear conversations and delete blocks if the session is being
             // permanently closed.
-            BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
-                history_model
-                    .clear_conversations_for_terminal_surface(self.terminal_view(ctx).id(), ctx);
-            });
+            if enable_hosted_integrations {
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
+                    history_model.clear_conversations_for_terminal_surface(
+                        self.terminal_view(ctx).id(),
+                        ctx,
+                    );
+                });
+            }
             self.delete_blocks(ctx);
         }
 
@@ -401,16 +412,18 @@ impl PaneContent for TerminalPane {
         // `attach` will re-register via `register_agent_view_controller` when the tab is
         // restored, so this is safe to run unconditionally.
         let terminal_view_id = self.terminal_view(ctx).id();
-        ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
-            for terminal_view_id in terminal_view_ids {
-                model.unregister_agent_view_controller(terminal_view_id, ctx);
-                model.unregister_ambient_session(terminal_view_id, ctx);
-            }
-        });
+        if enable_hosted_integrations {
+            ActiveAgentViewsModel::handle(ctx).update(ctx, |model, ctx| {
+                for terminal_view_id in terminal_view_ids {
+                    model.unregister_agent_view_controller(terminal_view_id, ctx);
+                    model.unregister_ambient_session(terminal_view_id, ctx);
+                }
+            });
+        }
 
         // Clean up any active CLI agent session so its notification is removed.
         // Skip this for moves — the session is still running and will re-register in the new tab.
-        if !matches!(detach_type, DetachType::Moved) {
+        if enable_hosted_integrations && !matches!(detach_type, DetachType::Moved) {
             CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
                 sessions.remove_session(terminal_view_id, ctx);
             });
@@ -419,18 +432,20 @@ impl PaneContent for TerminalPane {
         ctx.unsubscribe_to_model(&pane_stack);
 
         ctx.unsubscribe_to_view(&self.view);
-        ctx.unsubscribe_to_model(
-            &self
-                .terminal_view(ctx)
-                .as_ref(ctx)
-                .agent_view_controller()
-                .clone(),
-        );
+        if enable_hosted_integrations {
+            ctx.unsubscribe_to_model(
+                &self
+                    .terminal_view(ctx)
+                    .as_ref(ctx)
+                    .agent_view_controller()
+                    .clone(),
+            );
 
-        ctx.unsubscribe_to_model(&Manager::handle(ctx));
+            ctx.unsubscribe_to_model(&Manager::handle(ctx));
+        }
 
         #[cfg(feature = "local_fs")]
-        {
+        if enable_hosted_integrations {
             ctx.unsubscribe_to_model(&BlocklistAIHistoryModel::handle(ctx));
         }
     }
@@ -498,6 +513,19 @@ impl PaneContent for TerminalPane {
                     active_conversation_id: None,
                 })
             }
+        } else if !app.has_singleton_model::<LLMPreferences>() {
+            LeafContents::Terminal(TerminalPaneSnapshot {
+                uuid: self.uuid.clone(),
+                cwd: view.pwd_if_local(app),
+                is_active,
+                is_read_only: view.model.lock().is_read_only(),
+                shell_launch_data: view.shell_launch_data_if_local(app),
+                input_config: Some(current_input_config),
+                llm_model_override: None,
+                active_profile_id: None,
+                conversation_ids_to_restore: Vec::new(),
+                active_conversation_id: None,
+            })
         } else {
             let llm_model_override =
                 LLMPreferences::as_ref(app).get_base_llm_override(self.terminal_view(app).id());
@@ -934,8 +962,11 @@ fn handle_terminal_view_event(
                 }
             }
             Event::ShareModalOpened(block_id) => {
+                let Some(share_block_modal) = group.share_block_modal.clone() else {
+                    return;
+                };
                 group.terminal_with_open_share_block_modal = Some(terminal_pane_id);
-                group.share_block_modal.update(ctx, |share_modal, ctx| {
+                share_block_modal.update(ctx, |share_modal, ctx| {
                     if let Some(session) = group.terminal_view_from_pane_id(pane_id, ctx) {
                         let model = session.read(ctx, |view, _| view.model.clone());
                         share_modal.open_with_model_update(model, *block_id, ctx);

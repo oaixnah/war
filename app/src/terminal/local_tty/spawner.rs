@@ -1,4 +1,5 @@
 use anyhow::Result;
+use warp_core::channel::{Channel, ChannelState};
 #[cfg(unix)]
 use warp_errors::report_error;
 use warpui::{AppContext, Entity, SingletonEntity};
@@ -206,12 +207,14 @@ impl PtySpawner {
                 ));
                 is_fallback = true;
             } else {
-                send_telemetry_from_app_ctx!(
-                    TelemetryEvent::PtySpawned {
-                        mode: PtySpawnMode::TerminalServer
-                    },
-                    ctx
-                );
+                if ChannelState::channel() != Channel::Oss {
+                    send_telemetry_from_app_ctx!(
+                        TelemetryEvent::PtySpawned {
+                            mode: PtySpawnMode::TerminalServer
+                        },
+                        ctx
+                    );
+                }
                 return result;
             }
         }
@@ -221,7 +224,9 @@ impl PtySpawner {
         } else {
             PtySpawnMode::Direct
         };
-        send_telemetry_from_app_ctx!(TelemetryEvent::PtySpawned { mode }, ctx);
+        if ChannelState::channel() != Channel::Oss {
+            send_telemetry_from_app_ctx!(TelemetryEvent::PtySpawned { mode }, ctx);
+        }
 
         Self::spawn_pty_directly(
             options,

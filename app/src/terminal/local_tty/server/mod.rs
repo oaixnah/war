@@ -167,7 +167,12 @@ impl TerminalServer {
 
             let program = std::env::current_exe()
                 .context("Failed to determine path to current executable")?;
-            let server = Command::new(program)
+            let mut server_command = Command::new(program);
+            #[cfg(feature = "integration_tests")]
+            if warp_core::channel::ChannelState::channel() == warp_core::channel::Channel::Oss {
+                server_command.env("WAR_LOCAL_APP_INTEGRATION", "1");
+            }
+            let server = server_command
                 .pre_exec(move || {
                     // Make sure the server file descriptor is at the index
                     // we expect.

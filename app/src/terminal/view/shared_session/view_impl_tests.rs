@@ -836,6 +836,8 @@ fn test_conversation_details_auto_open_policy_defaults_to_open_for_ambient_share
             assert!(view.has_auto_opened_conversation_details_panel);
             assert!(
                 view.conversation_details_panel
+                    .as_ref()
+                    .expect("hosted terminal should have a conversation details panel")
                     .as_ref(ctx)
                     .task_display_status_for_test()
                     .is_some(),
@@ -864,6 +866,8 @@ fn test_suppressed_conversation_details_auto_open_consumes_initial_open_but_manu
             assert!(view.has_auto_opened_conversation_details_panel);
             assert!(
                 view.conversation_details_panel
+                    .as_ref()
+                    .expect("hosted terminal should have a conversation details panel")
                     .as_ref(ctx)
                     .task_display_status_for_test()
                     .is_none(),
@@ -875,6 +879,8 @@ fn test_suppressed_conversation_details_auto_open_consumes_initial_open_but_manu
             assert!(view.is_conversation_details_panel_open);
             assert!(
                 view.conversation_details_panel
+                    .as_ref()
+                    .expect("hosted terminal should have a conversation details panel")
                     .as_ref(ctx)
                     .task_display_status_for_test()
                     .is_some(),
@@ -912,6 +918,8 @@ fn test_child_shared_session_link_keeps_default_conversation_details_auto_open()
             assert!(view.has_auto_opened_conversation_details_panel);
             assert!(
                 view.conversation_details_panel
+                    .as_ref()
+                    .expect("hosted terminal should have a conversation details panel")
                     .as_ref(ctx)
                     .task_display_status_for_test()
                     .is_some(),
@@ -2429,6 +2437,8 @@ fn test_on_ambient_agent_execution_ended_refreshes_open_details_panel_to_termina
             view.fetch_and_update_conversation_details_panel(ctx);
             assert_eq!(
                 view.conversation_details_panel
+                    .as_ref()
+                    .expect("hosted terminal should have a conversation details panel")
                     .as_ref(ctx)
                     .task_display_status_for_test(),
                 Some(AgentRunDisplayStatus::TaskInProgress)
@@ -2437,6 +2447,8 @@ fn test_on_ambient_agent_execution_ended_refreshes_open_details_panel_to_termina
             view.on_ambient_agent_execution_ended(ctx);
             assert_eq!(
                 view.conversation_details_panel
+                    .as_ref()
+                    .expect("hosted terminal should have a conversation details panel")
                     .as_ref(ctx)
                     .task_display_status_for_test(),
                 Some(AgentRunDisplayStatus::ConversationSucceeded)

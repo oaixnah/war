@@ -126,6 +126,23 @@ const COMMANDS_COUNT_LIMIT: i64 = 10000;
 
 const WARP_SQLITE_FILE_NAME: &str = "warp.sqlite";
 
+#[cfg(test)]
+thread_local! {
+    static TEST_APP_DATABASE_FILE_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_app_database_file_path<T>(path: PathBuf, f: impl FnOnce() -> T) -> T {
+    TEST_APP_DATABASE_FILE_PATH.with(|override_path| {
+        assert!(override_path.replace(Some(path)).is_none());
+    });
+    let result = f();
+    TEST_APP_DATABASE_FILE_PATH.with(|override_path| {
+        override_path.replace(None);
+    });
+    result
+}
+
 /// Runs any migrations and creates the Sqlite database if it doesn't exist.
 /// Reads from the sqlite database to get the app state for session restoration.
 /// Starts a writer thread that listens for ModelEvents and processes them.
@@ -190,7 +207,10 @@ fn read_persisted_data(
     ctx: &mut AppContext,
     data_scope: PersistedDataScope,
 ) -> Option<Box<PersistedData>> {
-    let user_uid = AuthStateProvider::as_ref(ctx).get().user_id();
+    let user_uid = ctx
+        .has_singleton_model::<AuthStateProvider>()
+        .then(|| AuthStateProvider::as_ref(ctx).get().user_id())
+        .flatten();
     match read_sqlite_data(conn, user_uid, data_scope) {
         Ok(app_state) => Some(Box::new(app_state)),
         Err(err) => {
@@ -472,6 +492,11 @@ pub fn database_file_path_for_current_scope() -> PathBuf {
 }
 
 fn app_database_file_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_APP_DATABASE_FILE_PATH.with(|path| path.borrow().clone()) {
+        return path;
+    }
+
     warp_core::paths::secure_state_dir()
         .unwrap_or_else(warp_core::paths::state_dir)
         .join(WARP_SQLITE_FILE_NAME)
@@ -2719,6 +2744,37 @@ fn read_sqlite_data(
     } else {
         None
     };
+
+    if matches!(data_scope, PersistedDataScope::LocalApp) {
+        let commands = schema::commands::dsl::commands
+            .order(schema::commands::columns::id.desc())
+            .load_iter::<model::Command, DefaultLoadingMode>(conn)?
+            .filter_map(|command| command.ok())
+            .map(PersistedCommand::from)
+            .collect();
+        return Ok(PersistedData {
+            app_state,
+            cloud_objects: Default::default(),
+            workspaces: Default::default(),
+            current_workspace_uid: None,
+            command_history: commands,
+            user_profiles: Default::default(),
+            time_of_next_force_object_refresh: None,
+            object_actions: Default::default(),
+            experiments: Default::default(),
+            ai_queries: Default::default(),
+            nld_prompts: Default::default(),
+            codebase_indices: Default::default(),
+            workspace_language_servers: Default::default(),
+            multi_agent_conversations: Default::default(),
+            projects: Default::default(),
+            project_rules: Default::default(),
+            ignored_suggestions: Default::default(),
+            mcp_server_installations: Default::default(),
+            mcp_servers_to_restore: Default::default(),
+            conversation_summary_backfills: Default::default(),
+        });
+    }
 
     let read_context = load_cloud_object_read_context(conn, current_user_id)?;
     let mut cloud_objects: Vec<Box<dyn CloudObject>> = Vec::new();

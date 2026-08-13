@@ -36,6 +36,8 @@ pub use sqlite::database_file_path_for_current_scope;
 pub use sqlite::database_file_path_for_scope;
 #[cfg(any(feature = "local_fs", feature = "integration_tests"))]
 pub use sqlite::establish_ro_connection;
+#[cfg(all(test, feature = "local_fs"))]
+pub(crate) use sqlite::with_test_app_database_file_path;
 use uuid::Uuid;
 use warp_core::command::ExitCode;
 use warp_errors::report_error;
@@ -108,6 +110,8 @@ pub enum PersistedDataScope {
     /// The GUI app: everything, including window/tab/block session
     /// restoration and command history.
     Full,
+    /// The local War app: window/tab/pane restoration and command history only.
+    LocalApp,
     /// The `warp-tui` front-end: command history, cloud objects, user profiles,
     /// and agent/conversation state, but no GUI session restoration or pending
     /// object actions.
@@ -119,20 +123,28 @@ pub enum PersistedDataScope {
 impl PersistedDataScope {
     /// Window/tab/pane snapshots and restored blocks.
     fn session_restoration(self) -> bool {
-        matches!(self, PersistedDataScope::Full)
+        matches!(
+            self,
+            PersistedDataScope::Full | PersistedDataScope::LocalApp
+        )
     }
 
     /// Shell-command history consumed by both interactive front-ends.
     fn command_history(self) -> bool {
         matches!(
             self,
-            PersistedDataScope::Full | PersistedDataScope::TuiFrontend
+            PersistedDataScope::Full
+                | PersistedDataScope::LocalApp
+                | PersistedDataScope::TuiFrontend
         )
     }
 
     /// User profiles used to identify cloud-object creators in both interactive frontends.
     fn user_profiles(self) -> bool {
-        self != PersistedDataScope::CodebaseIndicesOnly
+        matches!(
+            self,
+            PersistedDataScope::Full | PersistedDataScope::TuiFrontend
+        )
     }
 
     /// Pending object actions, which only the GUI consumes.

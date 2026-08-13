@@ -960,6 +960,9 @@ impl TerminalView {
         &mut self,
         ctx: &mut ViewContext<Self>,
     ) {
+        let Some(panel) = self.conversation_details_panel.clone() else {
+            return;
+        };
         if let Some(task_id) = self.ambient_agent_task_id_for_details_panel(ctx) {
             let conversations_handle =
                 crate::ai::agent_conversations_model::AgentConversationsModel::handle(ctx);
@@ -977,8 +980,8 @@ impl TerminalView {
                         .cloned();
                     ConversationDetailsData::from_task_id(task_id, fetch_error)
                 });
-            self.conversation_details_panel.update(ctx, |panel, ctx| {
-                panel.set_conversation_details(data, ctx);
+            panel.update(ctx, |view, ctx| {
+                view.set_conversation_details(data, ctx);
             });
             return;
         }
@@ -992,8 +995,8 @@ impl TerminalView {
             .map(|conversation| ConversationDetailsData::from_conversation(conversation, ctx));
 
         if let Some(data) = data {
-            self.conversation_details_panel.update(ctx, |panel, ctx| {
-                panel.set_conversation_details(data, ctx);
+            panel.update(ctx, |view, ctx| {
+                view.set_conversation_details(data, ctx);
             });
         }
     }

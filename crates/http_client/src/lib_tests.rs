@@ -5,6 +5,30 @@ use tracing_subscriber::layer::SubscriberExt as _;
 
 use super::*;
 
+#[test]
+fn disabled_outbound_requests_fail_before_the_request_hook() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use futures::StreamExt as _;
+
+    let request_hook_called = Arc::new(AtomicBool::new(false));
+    let mut client = Client::new();
+    let request_hook_called_clone = request_hook_called.clone();
+    client.set_before_request_fn(Box::new(move |_, _| {
+        request_hook_called_clone.store(true, Ordering::Release);
+    }));
+
+    let mut event_source = client.get("https://example.com/events").eventsource();
+    disable_outbound_requests();
+    let result = futures::executor::block_on(client.get("https://example.com").send());
+    let event_source_result = futures::executor::block_on(event_source.next());
+
+    assert!(result.is_err());
+    assert!(event_source_result.is_some_and(|result| result.is_err()));
+    assert!(!request_hook_called.load(Ordering::Acquire));
+}
+
 /// Runs `f` with a real OpenTelemetry subscriber installed and a span entered,
 /// so `Span::current()` resolves to a valid OTEL span context.
 fn with_active_span<R>(f: impl FnOnce() -> R) -> R {

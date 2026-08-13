@@ -146,8 +146,7 @@ maybe_define_setting!(HasInitializedDefaultSecretRegexes, group: PrivacySettings
 /// Singleton model for managing the user's privacy settings (whether the user has enabled crash
 /// reporting and/or telemetry).
 pub struct PrivacySettings {
-    auth_state: Arc<AuthState>,
-    auth_client: Arc<dyn AuthClient>,
+    hosted_access: Option<(Arc<AuthState>, Arc<dyn AuthClient>)>,
     pub is_telemetry_enabled: bool,
     pub is_crash_reporting_enabled: bool,
     pub is_cloud_conversation_storage_enabled: bool,
@@ -231,6 +230,16 @@ impl PrivacySettings {
     pub fn register_singleton(ctx: &mut AppContext) {
         let handle = ctx.add_singleton_model(PrivacySettings::new);
 
+        Self::register_settings_events(handle, ctx);
+    }
+
+    pub fn register_local_singleton(ctx: &mut AppContext) {
+        let handle = ctx.add_singleton_model(PrivacySettings::new_local);
+
+        Self::register_settings_events(handle, ctx);
+    }
+
+    fn register_settings_events(handle: warpui::ModelHandle<Self>, ctx: &mut AppContext) {
         register_settings_events!(
             PrivacySettings,
             user_secret_regex_list,
@@ -246,6 +255,19 @@ impl PrivacySettings {
     fn new(ctx: &mut ModelContext<Self>) -> Self {
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
         let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
+
+        Self::new_with_hosted_access(Some((auth_state, auth_client)), ctx)
+    }
+
+    fn new_local(ctx: &mut ModelContext<Self>) -> Self {
+        Self::new_with_hosted_access(None, ctx)
+    }
+
+    fn new_with_hosted_access(
+        hosted_access: Option<(Arc<AuthState>, Arc<dyn AuthClient>)>,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
+        let is_local = hosted_access.is_none();
 
         // Initialize from `WarpDrivePrivacySettings`, which is the source of truth for these
         // booleans.
@@ -294,11 +316,11 @@ impl PrivacySettings {
             HasInitializedDefaultSecretRegexes::new_from_storage(ctx);
 
         Self {
-            auth_state,
-            auth_client,
-            is_crash_reporting_enabled,
-            is_telemetry_enabled,
-            is_cloud_conversation_storage_enabled,
+            hosted_access,
+            is_crash_reporting_enabled: !is_local && is_crash_reporting_enabled,
+            is_telemetry_enabled: !is_local && is_telemetry_enabled,
+            is_cloud_conversation_storage_enabled: !is_local
+                && is_cloud_conversation_storage_enabled,
             user_secret_regex_list,
             has_initialized_default_secret_regexes,
             is_telemetry_force_enabled: false,
@@ -378,7 +400,10 @@ impl PrivacySettings {
 
     /// Fetch the user's privacy settings from the server if any or update the server settings.
     pub fn fetch_or_update_settings(&self, ctx: &mut ModelContext<Self>) {
-        let auth_client_clone = self.auth_client.clone();
+        let Some((_, auth_client)) = &self.hosted_access else {
+            return;
+        };
+        let auth_client_clone = auth_client.clone();
         let _ = ctx.spawn(
             async move { auth_client_clone.get_user_settings().await },
             Self::initialize_from_fetched_settings_or_update_settings,
@@ -459,8 +484,10 @@ impl PrivacySettings {
     #[cfg(any(test, feature = "test-util"))]
     pub fn mock(_ctx: &mut ModelContext<Self>) -> Self {
         Self {
-            auth_state: Arc::new(AuthState::new_for_test()),
-            auth_client: Arc::new(MockAuthClient::new()),
+            hosted_access: Some((
+                Arc::new(AuthState::new_for_test()),
+                Arc::new(MockAuthClient::new()),
+            )),
             is_crash_reporting_enabled: true,
             is_telemetry_enabled: true,
             is_cloud_conversation_storage_enabled: true,
@@ -511,8 +538,10 @@ impl PrivacySettings {
                     .set_value(new_value, ctx);
             });
 
-            if self.auth_state.is_logged_in() {
-                let auth_client = self.auth_client.clone();
+            if let Some((auth_state, auth_client)) = &self.hosted_access
+                && auth_state.is_logged_in()
+            {
+                let auth_client = auth_client.clone();
                 let _ = ctx.spawn(
                     async move { auth_client.set_is_crash_reporting_enabled(new_value).await },
                     |_, _, _| (),
@@ -545,8 +574,10 @@ impl PrivacySettings {
                 let _ = settings.is_telemetry_enabled.set_value(new_value, ctx);
             });
 
-            if self.auth_state.is_logged_in() {
-                let auth_client = self.auth_client.clone();
+            if let Some((auth_state, auth_client)) = &self.hosted_access
+                && auth_state.is_logged_in()
+            {
+                let auth_client = auth_client.clone();
                 let _ = ctx.spawn(
                     async move { auth_client.set_is_telemetry_enabled(new_value).await },
                     |_, _, _| (),
@@ -579,8 +610,10 @@ impl PrivacySettings {
                 .set_value(new_value, ctx);
         });
 
-        if self.auth_state.is_logged_in() {
-            let auth_client = self.auth_client.clone();
+        if let Some((auth_state, auth_client)) = &self.hosted_access
+            && auth_state.is_logged_in()
+        {
+            let auth_client = auth_client.clone();
             let _ = ctx.spawn(
                 async move {
                     auth_client
@@ -686,8 +719,10 @@ impl PrivacySettings {
 
     /// Sends request(s) to update server-side user settings with current local values.
     fn update_server_with_local_settings(&self, ctx: &mut ModelContext<Self>) {
-        if self.auth_state.is_logged_in() {
-            let auth_client = self.auth_client.clone();
+        if let Some((auth_state, auth_client)) = &self.hosted_access
+            && auth_state.is_logged_in()
+        {
+            let auth_client = auth_client.clone();
             let snapshot = self.get_snapshot(ctx);
             let _ = ctx.spawn(
                 async move {

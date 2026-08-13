@@ -92,6 +92,46 @@ to make individual failures reproducible. The imported workspace can generate mo
 build output during complete testing, so start with at least 60 GiB free. After the source tree is
 simplified, these commands may be narrowed only if the replacement preserves equivalent coverage.
 
+### Windows Development Host
+
+Windows may be used for routine editing, compilation, Clippy, and unit tests to reduce load on the
+macOS verification machine. This does not add a Windows release to the MVP or replace the required
+macOS manual verification.
+
+Use Git Bash for repository scripts and PowerShell 7 for PowerShell linting. The Windows environment
+requires the pinned Rust toolchain, Git LFS, MSVC and the Windows SDK, CMake, Protobuf, LLVM with
+`LIBCLANG_PATH` pointing to its `bin` directory, Node with Corepack, Yarn 4.0.1, `cargo-nextest`, and
+`wgslfmt`. Enable Git long paths for the checkout. On a checkout that cannot materialize symlinks,
+leave `core.symlinks=false` so Git uses its regular-file fallback rather than reporting a deleted
+symlink.
+
+The inherited Windows CI excludes `command-signatures-v2` and `warp_js`. Use the same exclusions
+locally:
+
+```bash
+corepack install --global yarn@4.0.1
+git config core.longpaths true
+./script/format --check
+./script/check_no_inline_test_modules
+pwsh -NoProfile -Command "& './script/lint_powershell' -ci"
+cargo clippy --locked --workspace --exclude warp_js --exclude command-signatures-v2 --all-targets --tests -- -D warnings
+cargo clippy --locked -p warp --all-targets --tests -- -D warnings
+cargo nextest run --locked --workspace --exclude command-signatures-v2 --exclude warp_js --no-run
+cargo nextest run --locked --workspace --exclude command-signatures-v2 --exclude warp_js -E "not package(integration)" --no-fail-fast
+cargo test --locked --workspace --exclude command-signatures-v2 --exclude warp_js --doc
+```
+
+The complete test build can exceed 50 GiB and has a high peak memory requirement. On a machine with
+16 GiB of RAM, set `CARGO_BUILD_JOBS=1` for test compilation and keep a system-managed page file
+enabled. Some inherited Windows history tests read the current user's PSReadLine history through the
+Windows known-folder API; changing `APPDATA` alone does not isolate them. If those tests include the
+developer's history, reproduce them under a clean Windows account or CI runner and record the local
+result as an environment-isolation failure rather than passing evidence.
+
+Windows validation does not cover macOS application bundling and signing, Keychain integration,
+native window lifecycle, zsh and bash startup, or the M2 offline and network audit. Run those checks
+on macOS before considering an applicable change complete.
+
 ## Testing Strategy
 
 - Unit tests cover parsers, reducers, permission decisions, redaction, and provider event conversion.

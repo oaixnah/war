@@ -19,11 +19,11 @@ fn safe_browser_open_url_accepts_browser_safe_urls() {
 #[test]
 fn safe_browser_open_url_accepts_warp_channel_urls() {
     for scheme in [
+        "war",
         "warp",
         "warppreview",
         "warpdev",
         "warplocal",
-        "warposs",
         "warpintegration",
     ] {
         let url = format!("{scheme}://action/focus_cloud_mode");
@@ -42,6 +42,7 @@ fn safe_browser_open_url_rejects_script_capable_and_risky_urls() {
         "about:blank",
         "file:///tmp/payload.html",
         "ftp://example.com/file",
+        "warposs://action/focus_cloud_mode",
     ] {
         assert_eq!(safe_browser_open_url(url), None, "{url}");
     }

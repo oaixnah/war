@@ -242,7 +242,10 @@ impl TerminalView {
     /// Renders the back button for the pane header, or an empty element if the
     /// back button should not be shown.
     fn maybe_render_header_back_button(&self, app: &AppContext) -> Box<dyn Element> {
-        if !FeatureFlag::AgentView.is_enabled() || warpui::platform::is_mobile_device() {
+        if self.server_api.is_none()
+            || !FeatureFlag::AgentView.is_enabled()
+            || warpui::platform::is_mobile_device()
+        {
             return Flex::row().finish();
         }
 
@@ -385,7 +388,8 @@ impl TerminalView {
         app: &AppContext,
     ) -> (Box<dyn Element>, f32) {
         let appearance = Appearance::as_ref(app);
-        let is_fullscreen_agent_view = FeatureFlag::AgentView.is_enabled()
+        let is_fullscreen_agent_view = self.server_api.is_some()
+            && FeatureFlag::AgentView.is_enabled()
             && self.agent_view_controller.as_ref(app).is_fullscreen();
         let icon_color = Some(
             appearance
@@ -484,7 +488,8 @@ impl TerminalView {
     }
 
     fn render_parent_conversation_header_card(&self, app: &AppContext) -> Option<Box<dyn Element>> {
-        if !(FeatureFlag::AgentView.is_enabled()
+        if !(self.server_api.is_some()
+            && FeatureFlag::AgentView.is_enabled()
             && self.agent_view_controller.as_ref(app).is_fullscreen())
         {
             return None;
@@ -515,7 +520,8 @@ impl TerminalView {
         // breadcrumb row instead. When no children have arrived yet,
         // `OrchestrationPillBar::pill_specs` returns `None` and the pill
         // bar's `render` short-circuits to `Empty`.
-        if FeatureFlag::AgentView.is_enabled()
+        if self.server_api.is_some()
+            && FeatureFlag::AgentView.is_enabled()
             && self.agent_view_controller.as_ref(app).is_fullscreen()
         {
             // The wrapping `Flex::column` would otherwise pass an infinite
@@ -573,7 +579,8 @@ impl TerminalView {
         header_ctx: &view::HeaderRenderContext,
         app: &AppContext,
     ) -> Box<dyn Element> {
-        let is_fullscreen_agent_view = FeatureFlag::AgentView.is_enabled()
+        let is_fullscreen_agent_view = self.server_api.is_some()
+            && FeatureFlag::AgentView.is_enabled()
             && self.agent_view_controller.as_ref(app).is_fullscreen();
         let parent_conversation_header_card = self.render_parent_conversation_header_card(app);
 
@@ -730,7 +737,8 @@ impl BackingView for TerminalView {
             .lock()
             .shared_session_status()
             .is_sharer_or_viewer();
-        let is_fullscreen_agent_view = FeatureFlag::AgentView.is_enabled()
+        let is_fullscreen_agent_view = self.server_api.is_some()
+            && FeatureFlag::AgentView.is_enabled()
             && self.agent_view_controller.as_ref(app).is_fullscreen();
         is_shared
             || is_fullscreen_agent_view

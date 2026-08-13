@@ -3,6 +3,7 @@ pub mod iap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{fmt, future};
 
@@ -58,6 +59,14 @@ pub mod headers {
 /// Only read when the channel is `Channel::Integration`. The value is a newline-separated
 /// list of `Name:Value` pairs, where each pair is split on the first colon.
 const EXTRA_HTTP_HEADERS_ENV_VAR: &str = "WARP_EXTRA_HTTP_HEADERS";
+
+static OUTBOUND_REQUESTS_ENABLED: AtomicBool = AtomicBool::new(true);
+const BLOCKED_REQUEST_URL: &str = "war-disabled://outbound-request";
+
+/// Permanently blocks requests made through this HTTP client for the current process.
+pub fn disable_outbound_requests() {
+    OUTBOUND_REQUESTS_ENABLED.store(false, Ordering::Release);
+}
 
 /// A wrapper around a `reqwest::Client` to execute requests. Returns a custom `RequestBuilder` type
 /// that ensures any call to the underlying `reqwest::Client` are properly adapted so that they can
@@ -374,6 +383,19 @@ impl Client {
             prevent_sleep_reason,
         } = request;
 
+        if !OUTBOUND_REQUESTS_ENABLED.load(Ordering::Acquire) {
+            cfg_if::cfg_if! {
+                if #[cfg(target_family = "wasm")] {
+                    let result = self.wrapped.get(BLOCKED_REQUEST_URL).send().await?;
+                } else {
+                    let result = Compat::new(async {
+                        self.wrapped.get(BLOCKED_REQUEST_URL).send().await
+                    }).await?;
+                }
+            }
+            return Ok(Response(result));
+        }
+
         if let Some(before_response_send_fn) = &self.before_request_sent {
             before_response_send_fn(&request, &serialized_payload);
         }
@@ -497,14 +519,19 @@ impl<'a> RequestBuilder<'a> {
     /// Sends the request to the endpoint, which is assumed to be a streaming server-sent-events
     /// endpoint, and returns a corresponding `EventSource`.
     pub fn eventsource(self) -> EventSourceStream {
+        let prevent_sleep_reason = self.prevent_sleep_reason;
+        let wrapped = self.wrapped;
         cfg_if::cfg_if! {
             if #[cfg(target_family = "wasm")] {
-                let mut stream = self
-                    .wrapped
-                    .eventsource()
-                    .expect("Request type for SSE endpoint must be cloneable.");
-
                 let stream = stream! {
+                    let wrapped = if OUTBOUND_REQUESTS_ENABLED.load(Ordering::Acquire) {
+                        wrapped
+                    } else {
+                        reqwest::Client::new().get(BLOCKED_REQUEST_URL)
+                    };
+                    let mut stream = wrapped
+                        .eventsource()
+                        .expect("Request type for SSE endpoint must be cloneable.");
                     while let Some(event) = stream.next().await {
                         match event {
                             Ok(event) => {
@@ -520,12 +547,15 @@ impl<'a> RequestBuilder<'a> {
                     }
                 };
             } else {
-                let mut stream = self
-                    .wrapped
-                    .eventsource()
-                    .expect("Request type for SSE endpoint must be cloneable.");
-
                 let stream = stream! {
+                    let wrapped = if OUTBOUND_REQUESTS_ENABLED.load(Ordering::Acquire) {
+                        wrapped
+                    } else {
+                        reqwest::Client::new().get(BLOCKED_REQUEST_URL)
+                    };
+                    let mut stream = wrapped
+                        .eventsource()
+                        .expect("Request type for SSE endpoint must be cloneable.");
                     // Wrap the stream with async-compat since reqwest requires Tokio.
                     while let Some(event) = stream.next().compat().await {
                         match event {
@@ -553,7 +583,7 @@ impl<'a> RequestBuilder<'a> {
         // Wrap the stream in one that holds onto a prevent_sleep guard, if one is required here.
         let stream = prevent_sleep::Stream::wrap(
             stream,
-            self.prevent_sleep_reason.map(prevent_sleep::prevent_sleep),
+            prevent_sleep_reason.map(prevent_sleep::prevent_sleep),
         );
 
         cfg_if::cfg_if! {

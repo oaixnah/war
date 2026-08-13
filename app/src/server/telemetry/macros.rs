@@ -7,7 +7,9 @@ macro_rules! send_telemetry_sync_from_ctx {
         #[allow(unused_imports)]
         use warp_core::telemetry::TelemetryEvent as _;
         let event = $event;
-        if event.enablement_state().is_enabled() {
+        if event.enablement_state().is_enabled()
+            && $ctx.has_singleton_model::<$crate::server::server_api::ServerApiProvider>()
+        {
             let server_api =
                 <$crate::server::server_api::ServerApiProvider as warpui::SingletonEntity>::handle(
                     $ctx,
@@ -41,7 +43,9 @@ macro_rules! send_telemetry_sync_from_app_ctx {
     ($event:expr_2021, $app_ctx:expr_2021) => {
         #[allow(unused_imports)]
         use warp_core::telemetry::TelemetryEvent as _;
-        if $event.enablement_state().is_enabled() {
+        if $event.enablement_state().is_enabled()
+            && $app_ctx.has_singleton_model::<$crate::server::server_api::ServerApiProvider>()
+        {
             let server_api =
                 <$crate::server::server_api::ServerApiProvider as warpui::SingletonEntity>::handle(
                     $app_ctx,

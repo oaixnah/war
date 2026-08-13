@@ -97,7 +97,7 @@ use crate::terminal::shared_session::{
     SharedSessionSource, SharedSessionStatus,
 };
 use crate::test_util::settings::initialize_settings_for_tests;
-use crate::undo_close::UndoCloseStack;
+use crate::undo_close::{UndoCloseSettings, UndoCloseStack};
 use crate::warp_managed_paths_watcher::WarpManagedPathsWatcher;
 use crate::workflows::local_workflows::LocalWorkflows;
 use crate::workspace::sync_inputs::SyncedInputState;
@@ -258,6 +258,52 @@ fn mock_pane_group(app: &mut App, options: MockOptions) -> ViewHandle<PaneGroup>
             )
         });
     pane_group
+}
+
+#[test]
+fn test_absent_server_api_disables_hosted_pane_group_resources() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let tips_model = app.add_model(|_| TipsCompleted::default());
+        let (_, pane_group) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            let banner = ctx.add_model(|_| BannerState::default());
+            PaneGroup::new_with_panes_layout(
+                tips_model,
+                banner,
+                None,
+                PanesLayout::SingleTerminal(Box::default()),
+                Arc::new(HashMap::new()),
+                None,
+                ctx,
+            )
+        });
+
+        let pane_view = pane_group.read(&app, |pane_group, ctx| {
+            assert!(pane_group.server_api.is_none());
+            assert!(pane_group.share_block_modal.is_none());
+            assert!(pane_group.share_session_modal.is_none());
+            assert!(pane_group.shared_session_role_change_modal.is_none());
+
+            let terminal_pane_id = pane_group
+                .active_session_id(ctx)
+                .expect("local pane group should contain a terminal");
+            pane_group
+                .terminal_session_by_id(terminal_pane_id)
+                .expect("active terminal should have pane data")
+                .pane_view()
+        });
+
+        pane_view.read(&app, |pane_view, ctx| {
+            assert!(pane_view.header().as_ref(ctx).sharing_dialog().is_none());
+            assert!(
+                !pane_view
+                    .keymap_context(ctx)
+                    .set
+                    .contains("PaneView_HasSharedObject")
+            );
+        });
+    });
 }
 
 fn get_newly_created_pane_id(panes: &PaneGroup, existing_ids: &[PaneId]) -> PaneId {
@@ -2715,6 +2761,8 @@ fn test_start_shared_session_from_modal() {
             assert_eq!(
                 pane_group
                     .share_session_modal
+                    .as_ref()
+                    .expect("hosted pane group should have a share-session modal")
                     .as_ref(ctx)
                     .terminal_pane_id(),
                 Some(terminal_pane_id)
@@ -3450,6 +3498,12 @@ fn test_undo_close_keeps_a_file_pane_watching_its_file() {
 
     App::test((), |mut app| async move {
         initialize_app(&mut app);
+        UndoCloseSettings::handle(&app).update(&mut app, |settings, ctx| {
+            settings
+                .enabled
+                .set_value(true, ctx)
+                .expect("enable undo-close for the test");
+        });
         app.add_singleton_model(FileModel::new);
         let pane_group = mock_pane_group(&mut app, Default::default());
 

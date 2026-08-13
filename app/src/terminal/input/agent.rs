@@ -238,14 +238,15 @@ impl Input {
             .as_ref(app)
             .is_inline_model_selector()
         {
-            column.add_child(ChildView::new(&self.inline_model_selector_view).finish());
+            column.add_child(ChildView::new(&self.hosted_ui().inline_model_selector_view).finish());
         } else if FeatureFlag::InlineProfileSelector.is_enabled()
             && self
                 .suggestions_mode_model
                 .as_ref(app)
                 .is_profile_selector()
         {
-            column.add_child(ChildView::new(&self.inline_profile_selector_view).finish());
+            column
+                .add_child(ChildView::new(&self.hosted_ui().inline_profile_selector_view).finish());
         } else if self.suggestions_mode_model.as_ref(app).is_slash_commands()
             && !self.is_cloud_mode_input_v2_composing(app)
         {
@@ -325,7 +326,7 @@ impl Input {
         outer_stack.add_child(column.finish());
         maybe_add_buy_credits_banner(
             &mut outer_stack,
-            &self.buy_credits_banner,
+            &self.hosted_ui().buy_credits_banner,
             &self.weak_view_handle,
             self.is_pane_focused(app),
             self.terminal_view_id,
@@ -485,7 +486,7 @@ impl Input {
         outer_stack.add_child(input);
         maybe_add_buy_credits_banner(
             &mut outer_stack,
-            &self.buy_credits_banner,
+            &self.hosted_ui().buy_credits_banner,
             &self.weak_view_handle,
             self.is_pane_focused(app),
             self.terminal_view_id,
@@ -690,7 +691,7 @@ impl Input {
         let model = self.model.lock();
         maybe_add_buy_credits_banner(
             &mut stack,
-            &self.buy_credits_banner,
+            &self.hosted_ui().buy_credits_banner,
             &self.weak_view_handle,
             self.focus_handle.as_ref().is_none_or(|h| h.is_focused(app)),
             self.terminal_view_id,

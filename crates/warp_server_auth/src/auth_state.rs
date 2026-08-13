@@ -47,6 +47,9 @@ pub struct AuthState {
 
     /// The current authentication credentials.
     credentials: RwLock<Option<Credentials>>,
+
+    /// Local-only application state must not read or mutate account persistence.
+    local_only: bool,
 }
 
 impl AuthState {
@@ -56,6 +59,18 @@ impl AuthState {
             anonymous_id: get_or_create_anonymous_id(ctx),
             needs_reauth: AtomicBool::new(false),
             credentials: RwLock::new(None),
+            local_only: false,
+        }
+    }
+
+    /// Creates a logged-out state without loading or creating persisted account identity.
+    pub fn initialize_local() -> Self {
+        Self {
+            user: RwLock::new(None),
+            anonymous_id: Uuid::nil(),
+            needs_reauth: AtomicBool::new(false),
+            credentials: RwLock::new(None),
+            local_only: true,
         }
     }
     #[cfg(any(
@@ -85,6 +100,7 @@ impl AuthState {
             anonymous_id: Uuid::new_v4(),
             needs_reauth: AtomicBool::new(false),
             credentials: RwLock::new(Some(Self::test_credentials())),
+            local_only: false,
         }
     }
     #[cfg(any(test, feature = "test-util"))]
@@ -94,6 +110,7 @@ impl AuthState {
             anonymous_id: Uuid::new_v4(),
             needs_reauth: AtomicBool::new(false),
             credentials: RwLock::new(None),
+            local_only: false,
         }
     }
 
@@ -108,6 +125,7 @@ impl AuthState {
             anonymous_id: Uuid::new_v4(),
             needs_reauth: AtomicBool::new(false),
             credentials: RwLock::new(Some(Self::test_credentials())),
+            local_only: false,
         }
     }
 
@@ -193,6 +211,10 @@ impl AuthState {
 
     /// Determines the appropriate persistence action based on the current auth state.
     pub fn persist_action(&self) -> PersistAction {
+        if self.local_only {
+            return PersistAction::DoNothing;
+        }
+
         let user = self.user.read().clone();
         let credentials = self.credentials.read().clone();
 
@@ -616,3 +638,7 @@ impl Entity for AuthStateProvider {
 }
 
 impl SingletonEntity for AuthStateProvider {}
+
+#[cfg(test)]
+#[path = "auth_state_tests.rs"]
+mod tests;

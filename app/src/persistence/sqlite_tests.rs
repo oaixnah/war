@@ -166,6 +166,81 @@ fn sqlite_read_restores_app_state_and_codebase_metadata() {
     assert_eq!(restored.codebase_indices[0].path, metadata.path);
 }
 
+#[test]
+fn local_app_scope_restores_only_local_session_and_command_history() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+
+    let app_state = AppState {
+        windows: vec![test_terminal_window_snapshot(false)],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+    save_app_state(&mut conn, &app_state).expect("app state should save");
+    save_codebase_index_metadata(&mut conn, test_codebase_metadata("/tmp/cloud-index"))
+        .expect("codebase metadata should save");
+
+    let writer = start_writer(conn, database_path.clone()).expect("writer should start");
+    writer
+        .sender
+        .send(ModelEvent::InsertCommand {
+            metadata: StartedCommandMetadata {
+                command: "pwd".to_owned(),
+                start_ts: Some(Local::now()),
+                pwd: Some("/tmp/local-repo".to_owned()),
+                shell: Some("zsh".to_owned()),
+                username: Some("test-user".to_owned()),
+                hostname: Some("test-host".to_owned()),
+                session_id: Some(SessionId::from(1)),
+                git_branch: None,
+                cloud_workflow_id: None,
+                workflow_command: None,
+                is_agent_executed: false,
+            },
+        })
+        .expect("insert command event should send");
+    writer
+        .sender
+        .send(ModelEvent::UpsertUserProfiles {
+            profiles: vec![UserProfileWithUID {
+                firebase_uid: UserUid::new("cloud-user"),
+                display_name: Some("Cloud User".to_owned()),
+                email: "cloud@example.com".to_owned(),
+                photo_url: String::new(),
+            }],
+        })
+        .expect("user profile event should send");
+    writer
+        .sender
+        .send(ModelEvent::Terminate)
+        .expect("terminate event should send");
+    writer.handle.join().expect("writer should terminate");
+
+    let mut conn = setup_database(&database_path).expect("database should reopen");
+    let restored = read_sqlite_data(&mut conn, None, PersistedDataScope::LocalApp)
+        .expect("local app data should load");
+
+    assert_eq!(
+        restored
+            .app_state
+            .expect("local session state should be restored")
+            .windows
+            .len(),
+        1
+    );
+    assert_eq!(restored.command_history.len(), 1);
+    assert_eq!(restored.command_history[0].command, "pwd");
+    assert!(restored.cloud_objects.is_empty());
+    assert!(restored.workspaces.is_empty());
+    assert!(restored.user_profiles.is_empty());
+    assert!(restored.object_actions.is_empty());
+    assert!(restored.codebase_indices.is_empty());
+    assert!(restored.multi_agent_conversations.is_empty());
+    assert!(restored.projects.is_empty());
+}
+
 /// Mirrors `init_db(&PersistenceScope::Tui)` in an isolated tempdir: the TUI
 /// database lives in a `tui/` subdirectory, runs the same migrations, and
 /// round-trips a write+read using the TUI's `PersistedDataScope`.

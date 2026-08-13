@@ -102,6 +102,108 @@ fn add_window_with_cloud_mode_terminal(app: &mut App) -> ViewHandle<TerminalView
     terminal
 }
 
+fn initialize_app_for_local_terminal_view(app: &mut App) {
+    use warp_core::execution_mode::{AppExecutionMode, ExecutionMode};
+    use warp_core::semantic_selection::SemanticSelection;
+
+    app.add_singleton_model(|ctx| AppExecutionMode::new(ExecutionMode::App, false, ctx));
+    app.update(crate::settings::init_and_register_user_preferences);
+    app.add_singleton_model(|_| settings::SettingsManager::default());
+    app.add_singleton_model(crate::user_config::WarpConfig::mock);
+    app.update(|ctx| warpui_extras::secure_storage::register_noop("test", ctx));
+
+    BlockListSettings::register(app);
+    DebugSettings::register(app);
+    SessionSettings::register(app);
+    FontSettings::register(app);
+    TerminalSettings::register(app);
+    InputModeSettings::register(app);
+    InputSettings::register(app);
+    AppEditorSettings::register(app);
+    LigatureSettings::register(app);
+    crate::terminal::safe_mode_settings::SafeModeSettings::register(app);
+    crate::terminal::alt_screen_reporting::AltScreenReporting::register(app);
+    SemanticSelection::register(app);
+    app.update(crate::terminal::input::init);
+    app.add_singleton_model(|_| Appearance::mock());
+    app.add_singleton_model(PrivacySettings::mock);
+    app.add_singleton_model(|_| KeybindingChangedNotifier::new());
+    app.add_singleton_model(|_| crate::vim_registers::VimRegisters::new());
+    app.add_singleton_model(|_| crate::terminal::History::default());
+    app.add_singleton_model(|_| crate::terminal::AudibleBell::new());
+    app.add_singleton_model(|_| crate::context_chips::prompt::Prompt::mock());
+}
+
+fn assert_hosted_terminal_singletons_absent(app: &AppContext) {
+    assert!(!app.has_singleton_model::<CLIAgentSessionsModel>());
+    assert!(!app.has_singleton_model::<BlocklistAIHistoryModel>());
+    assert!(!app.has_singleton_model::<crate::ai::llms::LLMPreferences>());
+    assert!(!app.has_singleton_model::<AISettings>());
+    assert!(!app.has_singleton_model::<crate::ai::AIRequestUsageModel>());
+    assert!(!app.has_singleton_model::<AgentConversationsModel>());
+    assert!(!app.has_singleton_model::<ActiveAgentViewsModel>());
+    assert!(!app.has_singleton_model::<crate::workspaces::user_workspaces::UserWorkspaces>());
+    assert!(!app.has_singleton_model::<crate::server::server_api::ServerApiProvider>());
+    assert!(!app.has_singleton_model::<crate::auth::auth_manager::AuthManager>());
+    assert!(!app.has_singleton_model::<CloudModel>());
+    assert!(!app.has_singleton_model::<crate::network::NetworkStatus>());
+    assert!(!app.has_singleton_model::<warp_server_client::iap::IapManager>());
+}
+
+#[test]
+fn local_terminal_constructs_renders_and_builds_keymap_without_hosted_singletons() {
+    App::test((), |mut app| async move {
+        initialize_app_for_local_terminal_view(&mut app);
+        app.read(assert_hosted_terminal_singletons_absent);
+        let _agent_view = FeatureFlag::AgentView.override_enabled(true);
+
+        let tips_model = app.add_model(|_| Default::default());
+        let (_, terminal) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            TerminalView::new_local_for_test(tips_model, None, ctx)
+        });
+
+        terminal.read(&app, |view, ctx| {
+            assert!(!BackingView::should_render_header(view, ctx));
+            drop(view.render(ctx));
+            drop(view.keymap_context(ctx));
+            let input = view.input().as_ref(ctx);
+            drop(input.render(ctx));
+            drop(input.keymap_context(ctx));
+            drop(input.editor().as_ref(ctx).render(ctx));
+            drop(input.editor().as_ref(ctx).keymap_context(ctx));
+        });
+        terminal.update(&mut app, |view, ctx| {
+            view.show_find_bar(ctx);
+            view.is_slow_bootstrap_banner_open = true;
+        });
+        terminal.read(&app, |view, ctx| drop(view.render(ctx)));
+        app.read(assert_hosted_terminal_singletons_absent);
+    });
+}
+
+#[test]
+fn local_pty_spawn_failure_remains_renderable_without_hosted_singletons() {
+    App::test((), |mut app| async move {
+        initialize_app_for_local_terminal_view(&mut app);
+        let tips_model = app.add_model(|_| Default::default());
+        let (_, terminal) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            TerminalView::new_local_for_test(tips_model, None, ctx)
+        });
+
+        terminal.update(&mut app, |view, ctx| {
+            TerminalSurface::on_pty_spawn_failed(
+                view,
+                anyhow::anyhow!("synthetic local PTY failure"),
+                ctx,
+            );
+            assert!(view.pty_spawn_failed);
+            assert_eq!(view.rich_content_view_count_for_test(), 1);
+        });
+        terminal.read(&app, |view, ctx| drop(view.render(ctx)));
+        app.read(assert_hosted_terminal_singletons_absent);
+    });
+}
+
 /// Builds a resumable, owned (created by the current test user) Oz cloud task so
 /// `resolve_ai_query_routing` classifies a pane bound to it as a `NewCloudVm` follow-up target.
 fn owned_resumable_oz_task(task_id: AmbientAgentTaskId) -> AmbientAgentTask {

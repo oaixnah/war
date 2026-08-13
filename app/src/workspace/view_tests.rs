@@ -269,6 +269,132 @@ pub(crate) fn mock_workspace(app: &mut App) -> ViewHandle<Workspace> {
     workspace
 }
 
+fn local_terminal_snapshot(uuid: u8) -> PaneNodeSnapshot {
+    PaneNodeSnapshot::Leaf(LeafSnapshot {
+        is_focused: true,
+        custom_vertical_tabs_title: None,
+        contents: LeafContents::Terminal(TerminalPaneSnapshot {
+            uuid: vec![uuid],
+            cwd: Some("/tmp".to_owned()),
+            shell_launch_data: None,
+            is_active: true,
+            is_read_only: false,
+            input_config: None,
+            llm_model_override: None,
+            active_profile_id: None,
+            conversation_ids_to_restore: vec![],
+            active_conversation_id: None,
+        }),
+    })
+}
+
+fn local_window_snapshot(roots: Vec<PaneNodeSnapshot>, active_tab_index: usize) -> WindowSnapshot {
+    WindowSnapshot {
+        tabs: roots
+            .into_iter()
+            .map(|root| TabSnapshot {
+                custom_title: None,
+                root,
+                default_directory_color: None,
+                selected_color: Default::default(),
+                left_panel: None,
+                right_panel: None,
+                group_id: None,
+                pinned: false,
+            })
+            .collect(),
+        active_tab_index,
+        team_uid: None,
+        bounds: None,
+        fullscreen_state: Default::default(),
+        quake_mode: false,
+        universal_search_width: None,
+        warp_ai_width: None,
+        voltron_width: None,
+        warp_drive_index_width: None,
+        left_panel_open: false,
+        vertical_tabs_panel_open: false,
+        left_panel_width: None,
+        right_panel_width: None,
+        agent_management_filters: None,
+        tab_groups: vec![],
+    }
+}
+
+#[test]
+fn local_workspace_starts_with_one_fresh_terminal() {
+    let (layouts, active_tab_index) = local_pane_layouts(NewWorkspaceSource::Empty {
+        previous_active_window: None,
+        shell: None,
+    });
+
+    assert_eq!(layouts.len(), 1);
+    assert_eq!(active_tab_index, 0);
+    assert!(matches!(&layouts[0].0, PanesLayout::SingleTerminal(_)));
+}
+
+#[test]
+fn local_workspace_strips_hosted_terminal_options() {
+    let options = NewTerminalOptions {
+        is_shared_session_creator: terminal::shared_session::IsSharedSessionCreator::Yes {
+            source: terminal::shared_session::SharedSessionSource::user(None),
+        },
+        ..Default::default()
+    };
+    let (layouts, _) = local_pane_layouts(NewWorkspaceSource::Session {
+        options: Box::new(options),
+    });
+
+    let PanesLayout::SingleTerminal(options) = &layouts[0].0 else {
+        panic!("expected one local terminal");
+    };
+    assert!(matches!(
+        options.is_shared_session_creator,
+        terminal::shared_session::IsSharedSessionCreator::No
+    ));
+    assert!(options.conversation_restoration.is_none());
+}
+
+#[test]
+fn local_workspace_restores_only_valid_local_terminal_tabs() {
+    let snapshot = local_window_snapshot(
+        vec![local_terminal_snapshot(1), local_terminal_snapshot(2)],
+        1,
+    );
+    let (layouts, active_tab_index) = local_pane_layouts(NewWorkspaceSource::Restored {
+        window_snapshot: snapshot,
+        block_lists: Arc::new(HashMap::new()),
+    });
+
+    assert_eq!(layouts.len(), 2);
+    assert_eq!(active_tab_index, 1);
+    assert!(
+        layouts
+            .iter()
+            .all(|layout| matches!(&layout.0, PanesLayout::Snapshot(_)))
+    );
+}
+
+#[test]
+fn local_workspace_rejects_hosted_restoration_and_starts_fresh() {
+    let snapshot = local_window_snapshot(
+        vec![PaneNodeSnapshot::Leaf(LeafSnapshot {
+            is_focused: true,
+            custom_vertical_tabs_title: None,
+            contents: LeafContents::GetStarted,
+        })],
+        0,
+    );
+    let (layouts, active_tab_index) = local_pane_layouts(NewWorkspaceSource::Restored {
+        window_snapshot: snapshot,
+        block_lists: Arc::new(HashMap::new()),
+    });
+
+    assert_eq!(layouts.len(), 1);
+    assert_eq!(active_tab_index, 0);
+    assert!(matches!(&layouts[0].0, PanesLayout::SingleTerminal(_)));
+}
+
 #[test]
 fn test_open_new_window_for_team_reuses_existing_team_window() {
     App::test((), |mut app| async move {
@@ -3858,8 +3984,12 @@ fn test_worktree_sidecar_hides_linked_worktrees_from_repo_list() {
                     .collect::<Vec<_>>()
             });
 
-            let main_repo_label = main_repo.to_string_lossy().to_string();
-            let linked_worktree_label = linked_worktree.to_string_lossy().to_string();
+            let home = dirs::home_dir().map(|path| path.display().to_string());
+            let main_repo_path = main_repo.to_string_lossy().to_string();
+            let linked_worktree_path = linked_worktree.to_string_lossy().to_string();
+            let main_repo_label = user_friendly_path(&main_repo_path, home.as_deref()).into_owned();
+            let linked_worktree_label =
+                user_friendly_path(&linked_worktree_path, home.as_deref()).into_owned();
 
             assert!(labels.iter().any(|label| label == "Search repos"));
             assert!(labels.iter().any(|label| label == &main_repo_label));

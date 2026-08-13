@@ -30,7 +30,7 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1565,7 +1565,7 @@ pub struct Input {
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
     tips_completed: ModelHandle<TipsCompleted>,
     editor: ViewHandle<EditorView>,
-    server_api: Arc<ServerApi>,
+    server_api: Option<Arc<ServerApi>>,
     input_suggestions: ViewHandle<InputSuggestions>,
     suggestions_mode_model: ModelHandle<InputSuggestionsModeModel>,
     completions_menu_resizable_width: ResizableStateHandle,
@@ -1579,7 +1579,7 @@ pub struct Input {
     input_render_state_model_handle: ModelHandle<InputRenderStateModel>,
     workflows_state: WorkflowsState,
     env_var_collection_state: EnvVarCollectionState,
-    voltron_view: ViewHandle<Voltron>,
+    voltron_view: HostedResource<ViewHandle<Voltron>>,
     is_voltron_open: bool,
     command_x_ray_description: Option<Arc<Description>>,
     last_parsed_tokens: Option<decorations::ParsedTokensSnapshot>,
@@ -1590,10 +1590,10 @@ pub struct Input {
     has_pending_command: bool,
     last_word_insertion: LastWordInsertion,
 
-    ai_controller: ModelHandle<BlocklistAIController>,
-    ai_context_model: ModelHandle<BlocklistAIContextModel>,
-    ai_input_model: ModelHandle<BlocklistAIInputModel>,
-    ai_action_model: ModelHandle<BlocklistAIActionModel>,
+    ai_controller: HostedResource<ModelHandle<BlocklistAIController>>,
+    ai_context_model: HostedResource<ModelHandle<BlocklistAIContextModel>>,
+    ai_input_model: HostedResource<ModelHandle<BlocklistAIInputModel>>,
+    ai_action_model: HostedResource<ModelHandle<BlocklistAIActionModel>>,
     /// The input is responsible for managing the lifetime
     /// of this mouse state handle.
     #[allow(dead_code)]
@@ -1607,7 +1607,7 @@ pub struct Input {
     decorations_future_handle: Option<SpawnedFutureHandle>,
     autosuggestions_abort_handle: Option<AbortHandle>,
 
-    pub prompt_render_helper: PromptRenderHelper,
+    pub prompt_render_helper: HostedResource<PromptRenderHelper>,
     prompt_type: ModelHandle<PromptType>,
     // A cached copy of enable_autosuggestions from settings (to avoid
     // a settings read on every typed character).
@@ -1656,7 +1656,7 @@ pub struct Input {
     /// We store info about the last intelligent autosuggestion because we need it for
     /// data collection when the command completes, but state is cleared when the command is executed.
     last_intelligent_autosuggestion_result: Option<IntelligentAutosuggestionResult>,
-    next_command_model: ModelHandle<NextCommandModel>,
+    next_command_model: Option<ModelHandle<NextCommandModel>>,
 
     /// The last block that the user ran. This is used for generating autosuggestions.
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
@@ -1676,57 +1676,53 @@ pub struct Input {
 
     is_processing_attached_images: bool,
 
-    universal_developer_input_button_bar: ViewHandle<UniversalDeveloperInputButtonBar>,
+    universal_developer_input_button_bar:
+        HostedResource<ViewHandle<UniversalDeveloperInputButtonBar>>,
 
-    terminal_input_message_bar: ViewHandle<TerminalInputMessageBar>,
+    terminal_input_message_bar: HostedResource<ViewHandle<TerminalInputMessageBar>>,
 
-    agent_input_footer: ViewHandle<AgentInputFooter>,
-    prompt_suggestions_view: ViewHandle<PromptSuggestionsView>,
-    handoff_compose_state: ModelHandle<HandoffComposeState>,
+    agent_input_footer: HostedResource<ViewHandle<AgentInputFooter>>,
+    prompt_suggestions_view: HostedResource<ViewHandle<PromptSuggestionsView>>,
+    handoff_compose_state: HostedResource<ModelHandle<HandoffComposeState>>,
 
-    inline_slash_commands_view: ViewHandle<InlineSlashCommandView>,
+    inline_slash_commands_view: HostedResource<ViewHandle<InlineSlashCommandView>>,
     cloud_mode_v2_slash_commands_view: Option<ViewHandle<CloudModeV2SlashCommandView>>,
-    slash_command_data_source: ModelHandle<GuiSlashCommandDataSource>,
+    slash_command_data_source: HostedResource<ModelHandle<GuiSlashCommandDataSource>>,
     cloud_mode_composer_slash_command_data_source: Option<ModelHandle<GuiSlashCommandDataSource>>,
 
     /// Inline conversation menu for selecting AI conversations.
-    inline_conversation_menu_view: ViewHandle<InlineConversationMenuView>,
+    inline_conversation_menu_view: HostedResource<ViewHandle<InlineConversationMenuView>>,
 
     /// Inline plan menu for selecting among multiple plans.
-    inline_plan_menu_view: ViewHandle<InlinePlanMenuView>,
+    inline_plan_menu_view: HostedResource<ViewHandle<InlinePlanMenuView>>,
 
     /// Inline repos switcher menu.
-    inline_repos_menu_view: ViewHandle<InlineReposMenuView>,
-
-    /// Inline model selector for choosing the Agent base model.
-    inline_model_selector_view: ViewHandle<InlineModelSelectorView>,
-    /// Inline profile selector for choosing the active execution profile.
-    inline_profile_selector_view: ViewHandle<InlineProfileSelectorView>,
+    inline_repos_menu_view: HostedResource<ViewHandle<InlineReposMenuView>>,
 
     /// Inline skill selector for /open-skill command.
-    inline_skill_selector_view: ViewHandle<InlineSkillSelectorView>,
+    inline_skill_selector_view: HostedResource<ViewHandle<InlineSkillSelectorView>>,
 
     /// Whether the skill selector should invoke (true) or open (false) the skill.
     skill_selector_should_invoke: bool,
 
     /// Inline prompts menu for /prompts command.
-    inline_prompts_menu_view: ViewHandle<InlinePromptsMenuView>,
+    inline_prompts_menu_view: HostedResource<ViewHandle<InlinePromptsMenuView>>,
 
     /// Inline menu for selecting a query point when forking a conversation.
-    user_query_menu_view: ViewHandle<UserQueryMenuView>,
+    user_query_menu_view: HostedResource<ViewHandle<UserQueryMenuView>>,
 
     /// Inline menu for selecting a rewind point in a conversation.
-    rewind_menu_view: ViewHandle<RewindMenuView>,
+    rewind_menu_view: HostedResource<ViewHandle<RewindMenuView>>,
 
     /// Inline history menu for up-arrow with conversations and commands.
-    inline_history_menu_view: ViewHandle<InlineHistoryMenuView>,
+    inline_history_menu_view: HostedResource<ViewHandle<InlineHistoryMenuView>>,
 
     pub(super) cloud_mode_v2_history_menu_view: Option<ViewHandle<CloudModeV2HistoryMenuView>>,
 
-    inline_terminal_menu_positioner: ModelHandle<InlineMenuPositioner>,
+    inline_terminal_menu_positioner: HostedResource<ModelHandle<InlineMenuPositioner>>,
 
     /// Model for managing slash command state.
-    slash_command_model: ModelHandle<SlashCommandModel>,
+    slash_command_model: HostedResource<ModelHandle<SlashCommandModel>>,
 
     /// Cached flag indicating whether the editor buffer is empty, used to track changes between
     /// empty and non-empty states.
@@ -1738,20 +1734,62 @@ pub struct Input {
     /// Weak handle to this input view for drop target data
     weak_view_handle: WeakViewHandle<Input>,
 
-    buy_credits_banner: ViewHandle<BuyCreditsBanner>,
-    agent_status_view: ViewHandle<BlocklistAIStatusBar>,
+    hosted_ui: Option<HostedInputUi>,
+    agent_status_view: HostedResource<ViewHandle<BlocklistAIStatusBar>>,
     /// Optional queued-prompts panel rendered between `agent_status_view` and the input editor.
     /// Constructed in [`Input::new`] when [`FeatureFlag::QueueSlashCommand`] is enabled.
     queued_prompts_panel: Option<ViewHandle<QueuedPromptsPanelView>>,
-    agent_view_controller: ModelHandle<AgentViewController>,
-    agent_shortcut_view_model: ModelHandle<AgentShortcutViewModel>,
+    agent_view_controller: HostedResource<ModelHandle<AgentViewController>>,
+    agent_shortcut_view_model: HostedResource<ModelHandle<AgentShortcutViewModel>>,
     ambient_agent_view_state: Option<AmbientAgentViewState>,
-    ephemeral_message_model: ModelHandle<EphemeralMessageModel>,
+    ephemeral_message_model: HostedResource<ModelHandle<EphemeralMessageModel>>,
 
     /// When a command is executed from a prompt chip (e.g. `cd` from the directory dropdown),
     /// we snapshot the current input contents here so we can restore them after the command
     /// completes and the buffer would normally be cleared.
     input_contents_before_prompt_chip_command: Option<String>,
+}
+
+pub struct HostedResource<T>(Option<T>);
+
+impl<T> HostedResource<T> {
+    fn present(value: T) -> Self {
+        Self(Some(value))
+    }
+
+    fn absent() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> From<T> for HostedResource<T> {
+    fn from(value: T) -> Self {
+        Self::present(value)
+    }
+}
+
+impl<T> Deref for HostedResource<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .as_ref()
+            .expect("hosted input resource is unavailable on the local shell path")
+    }
+}
+
+impl<T> DerefMut for HostedResource<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+            .as_mut()
+            .expect("hosted input resource is unavailable on the local shell path")
+    }
+}
+
+struct HostedInputUi {
+    inline_model_selector_view: ViewHandle<InlineModelSelectorView>,
+    inline_profile_selector_view: ViewHandle<InlineProfileSelectorView>,
+    buy_credits_banner: ViewHandle<BuyCreditsBanner>,
 }
 
 struct AmbientAgentViewState {
@@ -2225,6 +2263,213 @@ enum Executing {
 }
 
 impl Input {
+    fn hosted_ui(&self) -> &HostedInputUi {
+        self.hosted_ui
+            .as_ref()
+            .expect("hosted input UI is unavailable on the OSS shell-only path")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_local_shell(
+        model: Arc<FairMutex<TerminalModel>>,
+        tips_completed: ModelHandle<TipsCompleted>,
+        sessions: ModelHandle<Sessions>,
+        size_info: SizeInfo,
+        menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
+        current_prompt: ModelHandle<PromptType>,
+        terminal_view_id: EntityId,
+        ctx: &mut ViewContext<Self>,
+    ) -> Self {
+        let input_render_state_model_handle =
+            ctx.add_model(|_| InputRenderStateModel::new(false, size_info));
+        let editor = ctx.add_typed_action_view(|ctx| {
+            EditorView::new(
+                EditorOptions {
+                    autogrow: true,
+                    autocomplete_symbols: true,
+                    propagate_and_no_op_vertical_navigation_keys:
+                        PropagateAndNoOpNavigationKeys::Always,
+                    propagate_horizontal_navigation_keys:
+                        PropagateHorizontalNavigationKeys::AtBoundary,
+                    propagate_and_no_op_escape_key: PropagateAndNoOpEscapeKey::PropagateFirst,
+                    soft_wrap: true,
+                    supports_vim_mode: true,
+                    use_settings_line_height_ratio: true,
+                    baseline_position_computation_method: BaselinePositionComputationMethod::Grid,
+                    middle_click_paste: false,
+                    allow_user_cursor_preference: true,
+                    delegate_paste_handling: true,
+                    keymap_context_modifier: Some(Box::new(|context, _| {
+                        context
+                            .set
+                            .insert(flags::TERMINAL_INPUT_PAGE_KEYS_HANDLED_BY_INPUT);
+                    })),
+                    #[cfg(feature = "voice_input")]
+                    enable_voice_input: false,
+                    ..Default::default()
+                },
+                ctx,
+            )
+        });
+        ctx.subscribe_to_view(&editor, |me, _, event, ctx| {
+            me.handle_editor_event(event, ctx);
+        });
+
+        let buffer_model = ctx.add_model(|ctx| InputBufferModel::new(&editor, ctx));
+        let suggestions_mode_model =
+            ctx.add_model(|_| InputSuggestionsModeModel::new(buffer_model));
+        ctx.subscribe_to_model(&suggestions_mode_model, |me, _, event, ctx| {
+            let InputSuggestionsModeEvent::ModeChanged {
+                buffer_to_restore, ..
+            } = event;
+            if let Some(buffer_state) = buffer_to_restore {
+                me.restore_buffer_state(buffer_state, ctx);
+            }
+            ctx.notify();
+        });
+
+        let input_suggestions = ctx.add_typed_action_view(InputSuggestions::new);
+        ctx.subscribe_to_view(&input_suggestions, |me, _, event, ctx| {
+            me.handle_suggestions_event(event, ctx);
+        });
+        ctx.subscribe_to_model(&Appearance::handle(ctx), |me, _, event, ctx| {
+            if let AppearanceEvent::ThemeChanged = event {
+                me.handle_theme_change(ctx);
+            }
+        });
+        ctx.subscribe_to_model(&TerminalSettings::handle(ctx), |_, _, event, ctx| {
+            if let TerminalSettingsChangedEvent::Spacing { .. } = event {
+                ctx.notify();
+            }
+        });
+        ctx.subscribe_to_model(&InputModeSettings::handle(ctx), |_, _, _, ctx| ctx.notify());
+        ctx.subscribe_to_model(&SessionSettings::handle(ctx), |me, _, event, ctx| {
+            me.handle_session_settings_event(event, ctx);
+        });
+        let editor_settings = AppEditorSettings::handle(ctx);
+        ctx.subscribe_to_model(&editor_settings, Self::handle_app_editor_settings_event);
+        ctx.subscribe_to_model(&LigatureSettings::handle(ctx), |_, _, _, ctx| ctx.notify());
+        ctx.subscribe_to_model(
+            &InputSettings::handle(ctx),
+            Self::handle_input_settings_event,
+        );
+
+        let (debounce_input_background_tx, _) = async_channel::unbounded();
+        let (debounce_ai_query_prediction_tx, _) = async_channel::unbounded();
+        let input_settings = InputSettings::as_ref(ctx);
+        let completions_menu_width = *input_settings.completions_menu_width.value();
+        let completions_menu_height = *input_settings.completions_menu_height.value();
+        let is_editor_empty = editor.as_ref(ctx).is_empty(ctx);
+        let deferred_remote_operations =
+            DeferredRemoteOperations::new(model.lock().block_list().active_block_id().clone());
+        let input_save_position_id = format!("status_free_input_{}", ctx.view_id());
+        let window_id = ctx.window_id();
+        let inline_terminal_menu_positioner = ctx.add_model(|ctx| {
+            InlineMenuPositioner::new_local(
+                &suggestions_mode_model,
+                format!("terminal_content_element_{terminal_view_id}"),
+                input_save_position_id,
+                size_info,
+                window_id,
+                ctx,
+            )
+        });
+
+        Self {
+            model,
+            menu_positioning_provider,
+            tips_completed,
+            editor,
+            server_api: None,
+            input_suggestions,
+            suggestions_mode_model,
+            completions_menu_resizable_width: resizable_state_handle(completions_menu_width),
+            completions_menu_resizable_height: resizable_state_handle(completions_menu_height),
+            sessions,
+            focus_handle: None,
+            active_block_metadata: None,
+            terminal_view_id,
+            view_id: ctx.view_id(),
+            input_render_state_model_handle,
+            workflows_state: WorkflowsState {
+                selected_workflow_state: None,
+            },
+            env_var_collection_state: EnvVarCollectionState {
+                selected_env_vars: None,
+            },
+            voltron_view: HostedResource::absent(),
+            is_voltron_open: false,
+            command_x_ray_description: None,
+            last_parsed_tokens: None,
+            debounce_input_background_tx,
+            debounce_ai_query_prediction_tx,
+            has_pending_command: false,
+            last_word_insertion: LastWordInsertion {
+                insert_command_from_history_index: 0,
+                is_latest_editor_event: false,
+            },
+            ai_controller: HostedResource::absent(),
+            ai_context_model: HostedResource::absent(),
+            ai_input_model: HostedResource::absent(),
+            ai_action_model: HostedResource::absent(),
+            ai_follow_up_icon_mouse_state: Default::default(),
+            completions_abort_handle: None,
+            decorations_future_handle: None,
+            autosuggestions_abort_handle: None,
+            prompt_render_helper: HostedResource::absent(),
+            prompt_type: current_prompt,
+            enable_autosuggestions_setting: *editor_settings.as_ref(ctx).enable_autosuggestions,
+            shared_session_input_state: None,
+            shared_session_presence_manager: None,
+            latest_buffer_operations: Vec::new(),
+            deferred_remote_operations,
+            prompt_suggestions_banner_state: None,
+            has_prompt_suggestion_banner: Arc::new(AtomicBool::new(false)),
+            was_intelligent_autosuggestion_accepted: false,
+            last_intelligent_autosuggestion_result: None,
+            next_command_model: None,
+            last_user_block_completed: None,
+            hoverable_handle: Default::default(),
+            #[cfg(feature = "local_fs")]
+            conn: None,
+            cached_agent_mode_hint_text: None,
+            predict_am_queries_future_handle: None,
+            attachment_chips: Vec::new(),
+            is_processing_attached_images: false,
+            universal_developer_input_button_bar: HostedResource::absent(),
+            terminal_input_message_bar: HostedResource::absent(),
+            agent_input_footer: HostedResource::absent(),
+            prompt_suggestions_view: HostedResource::absent(),
+            handoff_compose_state: HostedResource::absent(),
+            inline_slash_commands_view: HostedResource::absent(),
+            cloud_mode_v2_slash_commands_view: None,
+            slash_command_data_source: HostedResource::absent(),
+            cloud_mode_composer_slash_command_data_source: None,
+            inline_conversation_menu_view: HostedResource::absent(),
+            inline_plan_menu_view: HostedResource::absent(),
+            inline_repos_menu_view: HostedResource::absent(),
+            inline_skill_selector_view: HostedResource::absent(),
+            skill_selector_should_invoke: false,
+            inline_prompts_menu_view: HostedResource::absent(),
+            user_query_menu_view: HostedResource::absent(),
+            rewind_menu_view: HostedResource::absent(),
+            inline_history_menu_view: HostedResource::absent(),
+            cloud_mode_v2_history_menu_view: None,
+            inline_terminal_menu_positioner: inline_terminal_menu_positioner.into(),
+            slash_command_model: HostedResource::absent(),
+            is_editor_empty_on_last_edit: is_editor_empty,
+            weak_view_handle: ctx.handle(),
+            hosted_ui: None,
+            agent_status_view: HostedResource::absent(),
+            queued_prompts_panel: None,
+            agent_view_controller: HostedResource::absent(),
+            agent_shortcut_view_model: HostedResource::absent(),
+            ambient_agent_view_state: None,
+            ephemeral_message_model: HostedResource::absent(),
+            input_contents_before_prompt_chip_command: None,
+        }
+    }
+
     pub fn send_input_buffer_to_terminal_editor(
         &mut self,
         buffer_contents: Arc<String>,
@@ -2540,10 +2785,14 @@ impl Input {
         }
         // The /model picker's data source lists a different model set for cloud panes (it suppresses
         // custom-endpoint models), so keep it in sync for the link-join viewer.
-        let model_selector_model = view_model.clone();
-        self.inline_model_selector_view.update(ctx, |view, ctx| {
-            view.set_ambient_agent_view_model(model_selector_model, ctx);
-        });
+        if let Some(hosted_ui) = &self.hosted_ui {
+            let model_selector_model = view_model.clone();
+            hosted_ui
+                .inline_model_selector_view
+                .update(ctx, |view, ctx| {
+                    view.set_ambient_agent_view_model(model_selector_model, ctx);
+                });
+        }
         // The /skills selector hides skills on a disconnected cloud follow-up composer (skills run
         // locally and must not be shown when a follow-up should start a new cloud VM instead).
         let skill_selector_model = view_model.clone();
@@ -2611,7 +2860,7 @@ impl Input {
     pub(crate) fn new(
         model: Arc<FairMutex<TerminalModel>>,
         tips_completed: ModelHandle<TipsCompleted>,
-        server_api: Arc<ServerApi>,
+        server_api: Option<Arc<ServerApi>>,
         sessions: ModelHandle<Sessions>,
         size_info: SizeInfo,
         menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
@@ -2644,7 +2893,9 @@ impl Input {
         let is_shared_session_viewer = model.lock().shared_session_status().is_viewer();
         let handoff_compose_state = ctx.add_model(|_ctx| HandoffComposeState::default());
         ctx.subscribe_to_model(&handoff_compose_state, |me, _, _, ctx| {
-            me.set_zero_state_hint_text(ctx);
+            if me.server_api.is_some() {
+                me.set_zero_state_hint_text(ctx);
+            }
             ctx.notify();
         });
 
@@ -2927,7 +3178,9 @@ impl Input {
             me.update_cli_agent_editor_text_colors(ctx);
             // Re-sync enter_settings whenever the rich input opens or closes.
             me.update_cli_agent_enter_settings(ctx);
-            me.set_zero_state_hint_text(ctx);
+            if me.server_api.is_some() {
+                me.set_zero_state_hint_text(ctx);
+            }
             ctx.notify();
         });
 
@@ -2940,11 +3193,14 @@ impl Input {
             ai_input_model.clone(),
         );
 
-        let next_command_model = ctx.add_model(|_| {
-            NextCommandModel::new(sessions.clone(), model.clone(), server_api.clone())
-        });
-        ctx.subscribe_to_model(&next_command_model, |me, _, event, ctx| {
-            me.handle_next_command_model_event(event, ctx);
+        let next_command_model = server_api.as_ref().map(|server_api| {
+            let model_handle = ctx.add_model(|_| {
+                NextCommandModel::new(sessions.clone(), model.clone(), server_api.clone())
+            });
+            ctx.subscribe_to_model(&model_handle, |me, _, event, ctx| {
+                me.handle_next_command_model_event(event, ctx);
+            });
+            model_handle
         });
 
         let ai_follow_up_icon_mouse_state = MouseStateHandle::default();
@@ -3135,9 +3391,13 @@ impl Input {
                     })),
                     ..Default::default()
                 };
-                EditorView::new(options, ctx)
-                    .with_next_command_model(next_command_model.clone())
-                    .with_context_model(ai_context_model.clone())
+                let editor =
+                    EditorView::new(options, ctx).with_context_model(ai_context_model.clone());
+                if let Some(next_command_model) = next_command_model.clone() {
+                    editor.with_next_command_model(next_command_model)
+                } else {
+                    editor
+                }
             })
         };
 
@@ -3662,37 +3922,6 @@ impl Input {
             me.handle_repos_menu_event(event, ctx);
         });
 
-        let inline_model_selector_view = ctx.add_view(|ctx| {
-            InlineModelSelectorView::new(
-                terminal_view_id,
-                // Wired post-construction via `attach_ambient_agent_view_model`.
-                None,
-                suggestions_mode_model.clone(),
-                agent_view_controller.clone(),
-                &buffer_model,
-                cli_subagent_controller.clone(),
-                &inline_terminal_menu_positioner,
-                ctx,
-            )
-        });
-        ctx.subscribe_to_view(&inline_model_selector_view, |me, _, event, ctx| {
-            me.handle_inline_model_selector_event(event, ctx);
-        });
-
-        let inline_profile_selector_view = ctx.add_view(|ctx| {
-            InlineProfileSelectorView::new(
-                terminal_view_id,
-                suggestions_mode_model.clone(),
-                agent_view_controller.clone(),
-                &buffer_model,
-                &inline_terminal_menu_positioner,
-                ctx,
-            )
-        });
-        ctx.subscribe_to_view(&inline_profile_selector_view, |me, _, event, ctx| {
-            me.handle_inline_profile_selector_event(event, ctx);
-        });
-
         let inline_prompts_menu_view = ctx.add_view(|ctx| {
             InlinePromptsMenuView::new(
                 suggestions_mode_model.clone(),
@@ -3827,24 +4056,60 @@ impl Input {
             ctx.notify();
         });
 
-        let buy_credits_banner = ctx.add_typed_action_view(BuyCreditsBanner::new);
-        ctx.subscribe_to_view(&buy_credits_banner, |me, _, event, ctx| match event {
-            BuyCreditsBannerEvent::OpenBillingAndUsage => {
-                ctx.emit(Event::OpenSettings(SettingsSection::BillingAndUsage));
-            }
-            BuyCreditsBannerEvent::RefocusInput => {
-                ctx.focus(&me.editor);
-            }
-            BuyCreditsBannerEvent::OpenAutoReloadModal { purchased_credits } => {
-                ctx.emit(Event::OpenAutoReloadModal {
-                    purchased_credits: *purchased_credits,
-                });
-            }
-            BuyCreditsBannerEvent::ShowAutoReloadError { error_message } => {
-                ctx.emit(Event::ShowToast {
-                    message: error_message.to_string(),
-                    flavor: ToastFlavor::Error,
-                });
+        let hosted_ui = server_api.as_ref().map(|_| {
+            let inline_model_selector_view = ctx.add_view(|ctx| {
+                InlineModelSelectorView::new(
+                    terminal_view_id,
+                    None,
+                    suggestions_mode_model.clone(),
+                    agent_view_controller.clone(),
+                    &buffer_model,
+                    cli_subagent_controller.clone(),
+                    &inline_terminal_menu_positioner,
+                    ctx,
+                )
+            });
+            ctx.subscribe_to_view(&inline_model_selector_view, |me, _, event, ctx| {
+                me.handle_inline_model_selector_event(event, ctx);
+            });
+
+            let inline_profile_selector_view = ctx.add_view(|ctx| {
+                InlineProfileSelectorView::new(
+                    terminal_view_id,
+                    suggestions_mode_model.clone(),
+                    agent_view_controller.clone(),
+                    &buffer_model,
+                    &inline_terminal_menu_positioner,
+                    ctx,
+                )
+            });
+            ctx.subscribe_to_view(&inline_profile_selector_view, |me, _, event, ctx| {
+                me.handle_inline_profile_selector_event(event, ctx);
+            });
+
+            let buy_credits_banner = ctx.add_typed_action_view(BuyCreditsBanner::new);
+            ctx.subscribe_to_view(&buy_credits_banner, |me, _, event, ctx| match event {
+                BuyCreditsBannerEvent::OpenBillingAndUsage => {
+                    ctx.emit(Event::OpenSettings(SettingsSection::BillingAndUsage));
+                }
+                BuyCreditsBannerEvent::RefocusInput => ctx.focus(&me.editor),
+                BuyCreditsBannerEvent::OpenAutoReloadModal { purchased_credits } => {
+                    ctx.emit(Event::OpenAutoReloadModal {
+                        purchased_credits: *purchased_credits,
+                    });
+                }
+                BuyCreditsBannerEvent::ShowAutoReloadError { error_message } => {
+                    ctx.emit(Event::ShowToast {
+                        message: error_message.to_string(),
+                        flavor: ToastFlavor::Error,
+                    });
+                }
+            });
+
+            HostedInputUi {
+                inline_model_selector_view,
+                inline_profile_selector_view,
+                buy_credits_banner,
             }
         });
 
@@ -3921,7 +4186,7 @@ impl Input {
             input_render_state_model_handle,
             workflows_state,
             env_var_collection_state,
-            voltron_view,
+            voltron_view: voltron_view.into(),
             is_voltron_open: false,
             command_x_ray_description: None,
             last_parsed_tokens: None,
@@ -3933,14 +4198,14 @@ impl Input {
             autosuggestions_abort_handle: None,
             completions_abort_handle: None,
             menu_positioning_provider,
-            universal_developer_input_button_bar,
-            terminal_input_message_bar,
-            prompt_render_helper,
+            universal_developer_input_button_bar: universal_developer_input_button_bar.into(),
+            terminal_input_message_bar: terminal_input_message_bar.into(),
+            prompt_render_helper: prompt_render_helper.into(),
             prompt_type: current_prompt,
-            ai_controller,
-            ai_context_model,
-            ai_input_model,
-            ai_action_model,
+            ai_controller: ai_controller.into(),
+            ai_context_model: ai_context_model.into(),
+            ai_input_model: ai_input_model.into(),
+            ai_action_model: ai_action_model.into(),
             ai_follow_up_icon_mouse_state: MouseStateHandle::default(),
             enable_autosuggestions_setting: *editor_settings_handle
                 .as_ref(ctx)
@@ -3962,37 +4227,35 @@ impl Input {
             predict_am_queries_future_handle: None,
             attachment_chips: Default::default(),
             is_processing_attached_images: false,
-            prompt_suggestions_view,
-            handoff_compose_state,
-            slash_command_model,
-            inline_slash_commands_view,
+            prompt_suggestions_view: prompt_suggestions_view.into(),
+            handoff_compose_state: handoff_compose_state.into(),
+            slash_command_model: slash_command_model.into(),
+            inline_slash_commands_view: inline_slash_commands_view.into(),
             cloud_mode_v2_slash_commands_view,
-            inline_conversation_menu_view,
-            inline_plan_menu_view,
-            inline_repos_menu_view,
-            inline_model_selector_view,
-            inline_profile_selector_view,
-            inline_prompts_menu_view,
-            inline_skill_selector_view,
+            inline_conversation_menu_view: inline_conversation_menu_view.into(),
+            inline_plan_menu_view: inline_plan_menu_view.into(),
+            inline_repos_menu_view: inline_repos_menu_view.into(),
+            inline_prompts_menu_view: inline_prompts_menu_view.into(),
+            inline_skill_selector_view: inline_skill_selector_view.into(),
             skill_selector_should_invoke: false,
-            user_query_menu_view,
-            rewind_menu_view,
-            inline_history_menu_view,
+            user_query_menu_view: user_query_menu_view.into(),
+            rewind_menu_view: rewind_menu_view.into(),
+            inline_history_menu_view: inline_history_menu_view.into(),
             cloud_mode_v2_history_menu_view,
-            inline_terminal_menu_positioner,
+            inline_terminal_menu_positioner: inline_terminal_menu_positioner.into(),
             cached_agent_mode_hint_text: None,
             is_editor_empty_on_last_edit: is_editor_empty,
             weak_view_handle: ctx.handle(),
-            buy_credits_banner,
-            agent_status_view,
+            hosted_ui,
+            agent_status_view: agent_status_view.into(),
             queued_prompts_panel,
-            agent_view_controller,
-            agent_input_footer,
-            agent_shortcut_view_model,
+            agent_view_controller: agent_view_controller.into(),
+            agent_input_footer: agent_input_footer.into(),
+            agent_shortcut_view_model: agent_shortcut_view_model.into(),
             ambient_agent_view_state,
-            slash_command_data_source,
+            slash_command_data_source: slash_command_data_source.into(),
             cloud_mode_composer_slash_command_data_source,
-            ephemeral_message_model,
+            ephemeral_message_model: ephemeral_message_model.into(),
             input_contents_before_prompt_chip_command: None,
         };
 
@@ -5169,7 +5432,7 @@ impl Input {
                     }
                 }
                 // Accept path: close the model selector.
-                let selector_view = self.inline_model_selector_view.as_ref(ctx);
+                let selector_view = self.hosted_ui().inline_model_selector_view.as_ref(ctx);
                 let should_restore_buffer = selector_view.prompt_parked_for_search()
                     || !selector_view.filter_results_by_input();
                 if self
@@ -5367,6 +5630,7 @@ impl Input {
             // Toggling closed via the chip: restore the parked prompt if we
             // cleared it for search, otherwise just close.
             if self
+                .hosted_ui()
                 .inline_model_selector_view
                 .as_ref(ctx)
                 .prompt_parked_for_search()
@@ -5399,13 +5663,15 @@ impl Input {
         let has_input = !self.editor.as_ref(ctx).buffer_text(ctx).is_empty();
         let should_clear_prompt_for_search =
             has_input && FeatureFlag::RestorePromptOnInlineModelSelectorSearch.is_enabled();
-        self.inline_model_selector_view.update(ctx, |view, ctx| {
-            if has_input && !should_clear_prompt_for_search {
-                view.set_filter_results_by_input(false);
-            }
-            view.set_prompt_parked_for_search(should_clear_prompt_for_search);
-            view.set_active_tab(initial_tab, ctx);
-        });
+        self.hosted_ui()
+            .inline_model_selector_view
+            .update(ctx, |view, ctx| {
+                if has_input && !should_clear_prompt_for_search {
+                    view.set_filter_results_by_input(false);
+                }
+                view.set_prompt_parked_for_search(should_clear_prompt_for_search);
+                view.set_active_tab(initial_tab, ctx);
+            });
         self.suggestions_mode_model.update(ctx, |model, ctx| {
             model.set_mode(InputSuggestionsMode::ModelSelector, ctx);
         });
@@ -6450,20 +6716,25 @@ impl Input {
 
             let is_focused = focus_handle.is_focused(ctx);
 
-            me.prompt_render_helper
-                .prompt_view()
-                .update(ctx, |prompt_view, ctx| {
-                    prompt_view.on_pane_focus_changed(is_focused, ctx);
-                });
+            if let Some(prompt_render_helper) = &me.prompt_render_helper.0 {
+                prompt_render_helper
+                    .prompt_view()
+                    .update(ctx, |prompt_view, ctx| {
+                        prompt_view.on_pane_focus_changed(is_focused, ctx);
+                    });
+            }
 
-            me.set_zero_state_hint_text(ctx);
+            if me.server_api.is_some() {
+                me.set_zero_state_hint_text(ctx);
+            }
 
             // Update the universal developer input button bar blurred state when focus changes
-            if me.should_show_universal_developer_input(ctx) {
-                me.universal_developer_input_button_bar
-                    .update(ctx, |button_bar, ctx| {
-                        button_bar.set_is_in_active_terminal(is_focused, ctx);
-                    });
+            if me.should_show_universal_developer_input(ctx)
+                && let Some(button_bar) = &me.universal_developer_input_button_bar.0
+            {
+                button_bar.update(ctx, |button_bar, ctx| {
+                    button_bar.set_is_in_active_terminal(is_focused, ctx);
+                });
             }
         });
     }
@@ -6687,8 +6958,11 @@ impl Input {
     ) {
         match event {
             NextCommandModelEvent::NextCommandSuggestionReady => {
+                let Some(next_command_model) = &self.next_command_model else {
+                    return;
+                };
                 let NextCommandSuggestionState::Ready { is_from_cycle, .. } =
-                    self.next_command_model.as_ref(ctx).get_state()
+                    next_command_model.as_ref(ctx).get_state()
                 else {
                     return;
                 };
@@ -6971,7 +7245,10 @@ impl Input {
     }
 
     fn cycle_next_command_suggestion(&mut self, ctx: &mut ViewContext<Self>) {
-        self.next_command_model.update(ctx, |model, ctx| {
+        let Some(next_command_model) = &self.next_command_model else {
+            return;
+        };
+        next_command_model.update(ctx, |model, ctx| {
             model.cycle_next_command_suggestion(ctx);
         });
         self.editor.update(ctx, |editor, ctx| {
@@ -6988,6 +7265,9 @@ impl Input {
         block_completed: UserBlockCompleted,
         ctx: &mut ViewContext<Self>,
     ) {
+        let Some(next_command_model) = &self.next_command_model else {
+            return;
+        };
         if !is_next_command_enabled(ctx) {
             return;
         }
@@ -7022,7 +7302,7 @@ impl Input {
         let completer_data = self.completer_data();
         let block_context = Some(BlockContext::from_completed_block(&block_completed));
         let previous_result = self.last_intelligent_autosuggestion_result.take();
-        self.next_command_model.update(ctx, |model, ctx| {
+        next_command_model.update(ctx, |model, ctx| {
             model.generate_next_command_suggestion(
                 block_completed,
                 context,
@@ -7220,9 +7500,11 @@ impl Input {
                     self.editor.update(ctx, |editor, ctx| {
                         editor.clear_autosuggestion(ctx);
                     });
-                    self.next_command_model.update(ctx, |model, _| {
-                        model.clear_state();
-                    });
+                    if let Some(next_command_model) = &self.next_command_model {
+                        next_command_model.update(ctx, |model, _| {
+                            model.clear_state();
+                        });
+                    }
                 }
                 self.set_zero_state_hint_text(ctx);
 
@@ -7292,7 +7574,9 @@ impl Input {
                 self.editor.update(ctx, |editor, ctx| {
                     editor.clear_autosuggestion(ctx);
                 });
-                self.maybe_generate_autosuggestion(ctx);
+                if self.enable_autosuggestions_setting {
+                    self.maybe_generate_autosuggestion(ctx);
+                }
             }
         }
     }
@@ -7357,7 +7641,11 @@ impl Input {
             return;
         }
 
-        self.try_execute_command(&command, ctx);
+        if self.hosted_ui.is_none() {
+            self.try_execute_shell_only_command(&command, ctx);
+        } else {
+            self.try_execute_command(&command, ctx);
+        }
         self.has_pending_command = false;
 
         self.editor.update(ctx, |editor, ctx| {
@@ -7562,8 +7850,8 @@ impl Input {
         // Save the zero state next command state before clearing it.
         let zerostate_next_command_suggestion_info = self
             .next_command_model
-            .as_ref(ctx)
-            .get_zero_state_suggestion_info()
+            .as_ref()
+            .and_then(|model| model.as_ref(ctx).get_zero_state_suggestion_info())
             .cloned();
         // Clear the auto-suggestion in the editor, so the height of
         // the input box is not inaccurate for its contents. Since we
@@ -7587,9 +7875,11 @@ impl Input {
                 editor.clear_all_placeholder_text();
                 ctx.notify();
             });
-            self.next_command_model.update(ctx, |model, _| {
-                model.clear_state();
-            });
+            if let Some(next_command_model) = &self.next_command_model {
+                next_command_model.update(ctx, |model, _| {
+                    model.clear_state();
+                });
+            }
         }
 
         let home_dir = prompt::home_dir_for_block(
@@ -7707,6 +7997,53 @@ impl Input {
 
         // Close the input suggestions menu if it was open.
         self.close_input_suggestions(/*should_focus_input=*/ false, ctx);
+        did_execute
+    }
+
+    fn try_execute_shell_only_command(
+        &mut self,
+        command: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if let CanExecuteCommand::No(reason) = self.can_execute_command(ctx) {
+            log::warn!("Tried to execute command but can_execute_command was false: {reason:?}");
+            return false;
+        }
+
+        if !command.is_empty() {
+            self.editor.update(ctx, |editor, ctx| {
+                editor.clear_autosuggestion(ctx);
+                editor.clear_all_placeholder_text();
+                ctx.notify();
+            });
+        }
+
+        let home_dir = prompt::home_dir_for_block(
+            self.model.lock().block_list().active_block(),
+            self.sessions.as_ref(ctx),
+        );
+        self.model
+            .lock()
+            .block_list_mut()
+            .active_block_mut()
+            .set_home_dir(home_dir);
+
+        let did_execute = if self
+            .model
+            .lock()
+            .block_list()
+            .active_block()
+            .has_received_precmd()
+        {
+            self.start_block_and_write_command_to_pty(command, CommandExecutionSource::User, ctx);
+            true
+        } else {
+            false
+        };
+
+        self.workflows_state.selected_workflow_state = None;
+        self.clear_selected_env_var_collection();
+        self.close_input_suggestions(false, ctx);
         did_execute
     }
 
@@ -8652,7 +8989,11 @@ impl Input {
                 self.close_input_suggestions(/*should_focus_input=*/ true, ctx);
 
                 let command = self.get_command(ctx);
-                self.try_execute_command(&command, ctx);
+                if self.hosted_ui.is_some() {
+                    self.try_execute_command(&command, ctx);
+                } else {
+                    self.try_execute_shell_only_command(&command, ctx);
+                }
 
                 ctx.emit_a11y_content(AccessibilityContent::new_without_help(
                     format!("Executed: {command}"),
@@ -8697,18 +9038,20 @@ impl Input {
                             });
                         }
 
-                        self.ai_input_model.update(ctx, |ai_input_model, ctx| {
-                            let input_type = if selected_item.is_ai_query() {
-                                InputType::AI
-                            } else {
-                                InputType::Shell
-                            };
-                            ai_input_model.set_input_type(
-                                input_type,
-                                Some(InputTypeAutoDetectionSource::HistorySelection),
-                                ctx,
-                            );
-                        });
+                        if self.hosted_ui.is_some() {
+                            self.ai_input_model.update(ctx, |ai_input_model, ctx| {
+                                let input_type = if selected_item.is_ai_query() {
+                                    InputType::AI
+                                } else {
+                                    InputType::Shell
+                                };
+                                ai_input_model.set_input_type(
+                                    input_type,
+                                    Some(InputTypeAutoDetectionSource::HistorySelection),
+                                    ctx,
+                                );
+                            });
+                        }
                     }
                     InputSuggestionsMode::CompletionSuggestions {
                         replacement_start, ..
@@ -9013,7 +9356,9 @@ impl Input {
 
             if should_focus_input {
                 self.focus_input_box(ctx);
-                self.maybe_generate_autosuggestion(ctx);
+                if self.enable_autosuggestions_setting {
+                    self.maybe_generate_autosuggestion(ctx);
+                }
             } else {
                 ctx.notify();
             }
@@ -9067,6 +9412,10 @@ impl Input {
     }
 
     pub fn focus_input_box(&self, ctx: &mut ViewContext<Self>) {
+        if self.hosted_ui.is_none() {
+            ctx.focus(&self.editor);
+            return;
+        }
         if self.should_show_auth_secret_ftux(ctx)
             && let Some(ftux_view) = self.auth_secret_ftux_view().cloned()
         {
@@ -9223,15 +9572,19 @@ impl Input {
                 true
             }
             InputSuggestionsMode::ModelSelector => {
-                self.inline_model_selector_view.update(ctx, |view, ctx| {
-                    view.select_up(ctx);
-                });
+                self.hosted_ui()
+                    .inline_model_selector_view
+                    .update(ctx, |view, ctx| {
+                        view.select_up(ctx);
+                    });
                 true
             }
             InputSuggestionsMode::ProfileSelector => {
-                self.inline_profile_selector_view.update(ctx, |view, ctx| {
-                    view.select_up(ctx);
-                });
+                self.hosted_ui()
+                    .inline_profile_selector_view
+                    .update(ctx, |view, ctx| {
+                        view.select_up(ctx);
+                    });
                 true
             }
             InputSuggestionsMode::PromptsMenu => {
@@ -9364,7 +9717,7 @@ impl Input {
             // we should not restore/revert the changes to the input on-dismiss,
             // unless we parked a prompt to search (then we restore that prompt).
             InputSuggestionsMode::ModelSelector => {
-                let view = self.inline_model_selector_view.as_ref(ctx);
+                let view = self.hosted_ui().inline_model_selector_view.as_ref(ctx);
                 view.prompt_parked_for_search() || view.filter_results_by_input()
             }
             _ => true,
@@ -9591,15 +9944,19 @@ impl Input {
                 true
             }
             InputSuggestionsMode::ModelSelector => {
-                self.inline_model_selector_view.update(ctx, |view, ctx| {
-                    view.select_down(ctx);
-                });
+                self.hosted_ui()
+                    .inline_model_selector_view
+                    .update(ctx, |view, ctx| {
+                        view.select_down(ctx);
+                    });
                 true
             }
             InputSuggestionsMode::ProfileSelector => {
-                self.inline_profile_selector_view.update(ctx, |view, ctx| {
-                    view.select_down(ctx);
-                });
+                self.hosted_ui()
+                    .inline_profile_selector_view
+                    .update(ctx, |view, ctx| {
+                        view.select_down(ctx);
+                    });
                 true
             }
             InputSuggestionsMode::PromptsMenu => {
@@ -9700,7 +10057,7 @@ impl Input {
 
         let should_generate_autosuggestion = !editor.active_autosuggestion()
             && self.enable_autosuggestions_setting
-            && !self.ai_input_model.as_ref(ctx).is_ai_input_enabled();
+            && (self.hosted_ui.is_none() || !self.ai_input_model.as_ref(ctx).is_ai_input_enabled());
 
         if should_generate_autosuggestion {
             let buffer_text = editor.buffer_text(ctx);
@@ -9733,8 +10090,9 @@ impl Input {
             let context = WarpAiExecutionContext::new(&session);
             if let Some(last_user_block_completed) =
                 completer_data.last_user_block_completed.clone()
+                && let Some(next_command_model) = &self.next_command_model
             {
-                self.next_command_model.update(ctx, |model, ctx| {
+                next_command_model.update(ctx, |model, ctx| {
                     model.generate_next_command_suggestion_with_prefix(
                         Some(buffer_text),
                         last_user_block_completed,
@@ -10195,6 +10553,11 @@ impl Input {
     }
 
     fn handle_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
+        if self.hosted_ui.is_none() {
+            self.handle_shell_only_editor_event(event, ctx);
+            return;
+        }
+
         // We want to clear the token description hover on any editor action
         self.hide_x_ray(ctx);
 
@@ -10433,9 +10796,11 @@ impl Input {
                     controller.abort_in_progress_detection();
                 });
                 // Abort any inflight request to generate a Next Command suggestion.
-                self.next_command_model.update(ctx, |model, _| {
-                    model.abort_inflight_request();
-                });
+                if let Some(next_command_model) = &self.next_command_model {
+                    next_command_model.update(ctx, |model, _| {
+                        model.abort_inflight_request();
+                    });
+                }
 
                 if self.should_apply_decorations(ctx)
                     || should_run_ai_input_detection
@@ -11404,6 +11769,212 @@ impl Input {
         }
     }
 
+    fn handle_shell_only_editor_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
+        self.hide_x_ray(ctx);
+        if !matches!(event, EditorEvent::InsertLastWordPrevCommand) {
+            self.update_last_word_insertion_state();
+        }
+
+        match event {
+            EditorEvent::Edited(edit_origin) => {
+                if edit_origin.is_user() {
+                    self.model.lock().set_is_input_dirty(true);
+                }
+                if *edit_origin == EditOrigin::UserTyped
+                    && !ctx
+                        .model(&self.input_render_state_model_handle)
+                        .editor_modified_since_block_finished()
+                {
+                    self.input_render_state_model_handle
+                        .update(ctx, |state, _| {
+                            state.set_editor_modified_since_block_finished(true);
+                        });
+                }
+
+                let is_empty = self.editor.as_ref(ctx).is_empty(ctx);
+                if is_empty != self.is_editor_empty_on_last_edit {
+                    self.is_editor_empty_on_last_edit = is_empty;
+                    ctx.emit(Event::InputEmptyStateChanged {
+                        is_empty,
+                        reason: InputEmptyStateChangeReason::Edited,
+                    });
+                }
+                self.send_input_sync_event(edit_origin, ctx);
+
+                if self.suggestions_mode_model.as_ref(ctx).is_closed() {
+                    self.maybe_generate_autosuggestion(ctx);
+                    if self.should_show_completions_while_typing(ctx)
+                        && matches!(edit_origin, EditOrigin::UserTyped)
+                    {
+                        self.open_completion_suggestions(CompletionsTrigger::AsYouType, ctx);
+                    }
+                }
+            }
+            EditorEvent::SelectionChanged => {
+                if matches!(
+                    self.suggestions_mode_model.as_ref(ctx).mode(),
+                    InputSuggestionsMode::CompletionSuggestions { .. }
+                ) && !self.cursor_positioned_for_completion(ctx)
+                {
+                    self.close_input_suggestions(true, ctx);
+                }
+            }
+            EditorEvent::AutosuggestionAccepted { .. } => {
+                ctx.emit(Event::AutosuggestionAccepted);
+                self.input_suggestions.update(ctx, |suggestions, ctx| {
+                    suggestions.exit(false, ctx);
+                });
+            }
+            EditorEvent::Navigate(NavigationKey::Up) => self.shell_history_up(ctx),
+            EditorEvent::Navigate(NavigationKey::Down) => self.editor_down(ctx),
+            EditorEvent::Navigate(NavigationKey::PageUp) => ctx.emit(Event::PageUp),
+            EditorEvent::Navigate(NavigationKey::PageDown) => ctx.emit(Event::PageDown),
+            EditorEvent::Navigate(NavigationKey::Tab) => self.input_tab(ctx),
+            EditorEvent::Navigate(NavigationKey::ShiftTab) => self.input_shift_tab(ctx),
+            EditorEvent::Navigate(NavigationKey::Right) => {}
+            EditorEvent::Enter => self.input_enter_shell_only(ctx),
+            EditorEvent::CmdEnter => ctx.emit(Event::UnhandledCmdEnter),
+            EditorEvent::CtrlEnter => ctx.emit(Event::CtrlEnter),
+            EditorEvent::Escape => {
+                if !matches!(
+                    self.editor.as_ref(ctx).vim_mode(ctx),
+                    None | Some(VimMode::Normal)
+                ) {
+                    self.editor.update(ctx, |editor, ctx| {
+                        editor.handle_action(&EditorAction::VimEscape, ctx);
+                    });
+                } else {
+                    ctx.emit(Event::Escape);
+                }
+            }
+            EditorEvent::CtrlC { cleared_buffer_len } => {
+                self.close_input_suggestions(true, ctx);
+                ctx.emit(Event::CtrlC {
+                    cleared_buffer_len: *cleared_buffer_len,
+                });
+            }
+            EditorEvent::CmdUpOnFirstRow => ctx.emit(Event::SelectRecentBlocks { count: 1 }),
+            EditorEvent::Copy => ctx.emit(Event::Copy),
+            EditorEvent::UnhandledModifierKeyOnEditor(keystroke) => {
+                ctx.emit(Event::UnhandledModifierKeyOnEditor(keystroke.clone()));
+            }
+            EditorEvent::ClearParentSelections => ctx.emit(Event::ClearSelectionsWhenShellMode),
+            EditorEvent::HideXRay => self.hide_x_ray(ctx),
+            EditorEvent::TryToShowXRay(token_at) => match token_at {
+                CommandXRayAnchor::Cursor => self.start_xray_at_offset(
+                    self.start_byte_index_of_first_selection(ctx),
+                    CommandXRayTrigger::Keystroke,
+                    ctx,
+                ),
+                CommandXRayAnchor::Hover(position) => {
+                    if let Some(offset) = self.start_byte_index_at_point(position, ctx) {
+                        self.start_xray_at_offset(offset, CommandXRayTrigger::Hover, ctx);
+                    }
+                }
+            },
+            EditorEvent::InsertLastWordPrevCommand => self.insert_last_word_previous_command(ctx),
+            EditorEvent::Search { term, .. } => {
+                ctx.emit(Event::ShowCommandSearch(CommandSearchOptions {
+                    filter: Some(QueryFilter::History),
+                    init_content: InitContent::Custom(term.clone().unwrap_or_default()),
+                }));
+            }
+            EditorEvent::VimStatusUpdate => ctx.notify(),
+            EditorEvent::UpdatePeers { operations } => {
+                self.latest_buffer_operations.extend(operations.to_vec());
+                ctx.emit(Event::EditorUpdated {
+                    block_id: self.model.lock().block_list().active_block_id().clone(),
+                    operations: operations.clone(),
+                });
+            }
+            EditorEvent::MiddleClickPaste => ctx.emit(Event::InputFocusedFromMiddleClick),
+            EditorEvent::Focused => ctx.emit(Event::EditorFocused),
+            EditorEvent::Paste => {
+                let content = ctx.clipboard().read();
+                self.insert_clipboard_text_content(ctx, content);
+            }
+            EditorEvent::DroppedImageFiles(paths) => {
+                let shell_family = self.editor.read(ctx, |editor, _| editor.shell_family());
+                let paths = warpui::clipboard_utils::escaped_paths_str(paths, shell_family);
+                self.editor
+                    .update(ctx, |editor, ctx| editor.user_insert(&paths, ctx));
+            }
+            EditorEvent::IgnoreAutosuggestion { .. } => {
+                self.editor
+                    .update(ctx, |editor, ctx| editor.clear_autosuggestion(ctx));
+            }
+            _ => {}
+        }
+    }
+
+    fn shell_history_up(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.suggestions_mode_model.as_ref(ctx).is_visible() && self.can_query_history(ctx) {
+            self.input_suggestions.update(ctx, |suggestions, ctx| {
+                suggestions.select_prev(ctx);
+            });
+            return;
+        }
+        if !self.editor.as_ref(ctx).single_cursor_on_first_row(ctx) {
+            self.editor.update(ctx, |editor, ctx| editor.move_up(ctx));
+            return;
+        }
+
+        let input_config = InputConfig {
+            input_type: InputType::Shell,
+            is_locked: true,
+        };
+        let history = History::as_ref(ctx).up_arrow_suggestions_for_terminal_surface(
+            self.terminal_view_id,
+            self.active_block_session_id(),
+            UpArrowHistoryConfig::for_input_config(&input_config),
+            ctx,
+        );
+        let original_buffer = self.editor.as_ref(ctx).buffer_text(ctx);
+        let matches = InputSuggestions::history_prefix_search(&original_buffer, history);
+        self.input_suggestions.update(ctx, |suggestions, ctx| {
+            suggestions.set_history_matches(matches, ctx);
+        });
+        let original_cursor_point = self.editor.as_ref(ctx).single_cursor_to_point(ctx);
+        self.suggestions_mode_model.update(ctx, |model, ctx| {
+            model.set_mode(
+                InputSuggestionsMode::HistoryUp {
+                    original_buffer,
+                    original_cursor_point,
+                    search_mode: HistorySearchMode::Prefix,
+                    original_input_type: InputType::Shell,
+                    original_input_was_locked: true,
+                },
+                ctx,
+            );
+        });
+        ctx.notify();
+    }
+
+    fn input_enter_shell_only(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.emit(Event::Enter);
+        if self.should_insert_newline_on_enter(ctx) {
+            self.editor.update(ctx, |editor, ctx| {
+                editor.user_initiated_insert("\n", PlainTextEditorViewAction::NewLine, ctx);
+            });
+            return;
+        }
+        if matches!(
+            self.suggestions_mode_model.as_ref(ctx).mode(),
+            InputSuggestionsMode::CompletionSuggestions { .. }
+        ) && self.should_enter_accept_completion_suggestion(ctx)
+        {
+            self.input_suggestions.update(ctx, |suggestions, ctx| {
+                suggestions.confirm(ctx);
+            });
+            return;
+        }
+
+        let command = self.editor.as_ref(ctx).buffer_text(ctx);
+        if self.try_execute_shell_only_command(&command, ctx) {
+            self.model.lock().set_is_input_dirty(false);
+        }
+    }
+
     /// Process paste event by checking clipboard for images and handling appropriately.
     fn process_paste_event(&mut self, ctx: &mut ViewContext<Self>) {
         // Read from app clipboard
@@ -12093,7 +12664,8 @@ impl Input {
         let buffer_text = editor.buffer_text(ctx);
 
         self.is_completions_while_typing_turned_on(ctx)
-            && (!self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
+            && (self.hosted_ui.is_none()
+                || !self.ai_input_model.as_ref(ctx).is_ai_input_enabled()
                 || should_show_completions_in_ai_input(&buffer_text))
             && buffer_text.len() >= MIN_BUFFER_LEN_TO_SHOW_COMPLETIONS_WHILE_TYPING
             && self.is_cursor_in_valid_position_for_completions_while_typing(ctx)
@@ -12203,7 +12775,8 @@ impl Input {
         // even though the active block is a long-running command.
         // However, completions are disabled on warpified remote hosts because
         // in-band generators don't work in this context (with CLI agent).
-        let is_cli_agent_shell_mode = self.is_locked_in_shell_mode(ctx)
+        let is_cli_agent_shell_mode = self.hosted_ui.is_some()
+            && self.is_locked_in_shell_mode(ctx)
             && CLIAgentSessionsModel::as_ref(ctx).is_input_open(self.terminal_view_id)
             && !self
                 .active_session(ctx)
@@ -12279,7 +12852,11 @@ impl Input {
             last_abort_handle.abort();
         }
 
-        let input_type = self.ai_input_model.as_ref(ctx).input_type();
+        let input_type = if self.hosted_ui.is_some() {
+            self.ai_input_model.as_ref(ctx).input_type()
+        } else {
+            InputType::Shell
+        };
 
         // Don't trigger completions if the last character typed is whitespace, in AI input mode.
         // The user is likely typing in a natural language word at this point, not a filepath.
@@ -12802,6 +13379,7 @@ impl Input {
             // shift + tab should cycle between them.
             InputSuggestionsMode::ModelSelector => {
                 if self
+                    .hosted_ui()
                     .inline_model_selector_view
                     .update(ctx, |view, ctx| view.select_next_tab(ctx))
                 {
@@ -13344,7 +13922,8 @@ impl Input {
             .as_ref(ctx)
             .is_inline_model_selector()
         {
-            self.inline_model_selector_view
+            self.hosted_ui()
+                .inline_model_selector_view
                 .update(ctx, |view, ctx| view.accept_selected_item(false, ctx));
             return;
         }
@@ -13354,7 +13933,8 @@ impl Input {
             .as_ref(ctx)
             .is_profile_selector()
         {
-            self.inline_profile_selector_view
+            self.hosted_ui()
+                .inline_profile_selector_view
                 .update(ctx, |view, ctx| view.accept_selected_item(ctx));
             return;
         }
@@ -13741,7 +14321,8 @@ impl Input {
             InputSuggestionsMode::ModelSelector
                 if FeatureFlag::InlineMenuHeaders.is_enabled() =>
             {
-                self.inline_model_selector_view
+                self.hosted_ui()
+                    .inline_model_selector_view
                     .update(ctx, |view, ctx| view.accept_selected_item(true, ctx));
             }
             InputSuggestionsMode::UserQueryMenu { .. } => {
@@ -13866,7 +14447,9 @@ impl Input {
             system_context: context.to_json_string(),
         };
 
-        let server_api = self.server_api.clone();
+        let Some(server_api) = self.server_api.clone() else {
+            return;
+        };
 
         self.predict_am_queries_future_handle = Some(ctx.spawn(
             async move {
@@ -15130,6 +15713,33 @@ impl Input {
         block_completed_event: BlockCompletedEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        if self.hosted_ui.is_none() {
+            if let BlockType::User(user_block) = &block_completed_event.block_type {
+                let latest_block_id = self.model.lock().block_list().active_block_id().clone();
+                if !user_block.was_part_of_agent_interaction
+                    && self.deferred_remote_operations.latest_block_id != latest_block_id
+                {
+                    self.deferred_remote_operations.latest_block_id = latest_block_id;
+                    self.editor
+                        .update(ctx, |editor, ctx| editor.reinitialize_buffer(None, ctx));
+                    self.latest_buffer_operations.clear();
+                    self.is_editor_empty_on_last_edit = true;
+                    ctx.emit(Event::InputEmptyStateChanged {
+                        is_empty: true,
+                        reason: InputEmptyStateChangeReason::UserCommandCompleted,
+                    });
+                }
+                if self.enable_autosuggestions_setting {
+                    self.maybe_generate_autosuggestion(ctx);
+                }
+            }
+            self.input_render_state_model_handle
+                .update(ctx, |input_render_state_model, _| {
+                    input_render_state_model.set_editor_modified_since_block_finished(false);
+                });
+            ctx.notify();
+            return;
+        }
         // We clear the input box after executing a command here instead of where we
         // execute a command to avoid the input box flashing when its contents are
         // cleared. For the multiline input box case, this also caused contents to go
@@ -15238,6 +15848,24 @@ impl Input {
         block: BlockType,
         ctx: &mut ViewContext<Self>,
     ) {
+        if self.hosted_ui.is_none() {
+            if let BlockType::User(block_completed) = block {
+                self.last_user_block_completed = Some(block_completed);
+                ctx.emit(Event::InputStateChanged(InputState::Enabled));
+            } else if block.is_bootstrap_block()
+                && self
+                    .model
+                    .lock()
+                    .block_list()
+                    .is_bootstrapping_precmd_done()
+            {
+                self.refresh_deferred_remote_operations(ctx);
+                if self.enable_autosuggestions_setting {
+                    self.maybe_generate_autosuggestion(ctx);
+                }
+            }
+            return;
+        }
         if let BlockType::User(block_completed) = block {
             self.last_user_block_completed = Some(block_completed.clone());
 
@@ -15551,6 +16179,9 @@ impl Input {
     }
 
     pub fn update_prompt_display_chips(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.hosted_ui.is_none() {
+            return;
+        }
         let session_context = self.completion_session_context(ctx);
 
         self.prompt_render_helper
@@ -16228,6 +16859,12 @@ impl View for Input {
 
     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
         if focus_ctx.is_self_focused() {
+            if self.hosted_ui.is_none() {
+                ctx.focus(&self.editor);
+                ctx.notify();
+                ctx.dispatch_typed_action(&PaneGroupAction::HandleFocusChange);
+                return;
+            }
             if self.is_voltron_open {
                 ctx.focus(&self.voltron_view);
             } else if self.prompt_render_helper.has_open_chip_menu(ctx) {
@@ -16247,6 +16884,35 @@ impl View for Input {
 
     fn keymap_context(&self, app: &AppContext) -> warpui::keymap::Context {
         let mut ctx = Self::default_keymap_context();
+        if self.hosted_ui.is_none() {
+            ctx.set.insert(flags::TERMINAL_MODE_INPUT);
+            ctx.set.insert(flags::LOCKED_INPUT);
+            if self.buffer_text(app).is_empty() {
+                ctx.set.insert(flags::EMPTY_INPUT_BUFFER);
+            }
+            if AppEditorSettings::as_ref(app).vim_mode_enabled() {
+                ctx.set.insert("VimModeEnabled");
+            }
+            if let Some(VimMode::Normal) = self.editor.as_ref(app).vim_mode(app) {
+                ctx.set.insert("VimNormalMode");
+            }
+            let model = self.model.lock();
+            ctx.set
+                .insert(model.shared_session_status().as_keymap_context());
+            if model
+                .block_list()
+                .active_block()
+                .is_active_and_long_running()
+            {
+                ctx.set.insert("LongRunningCommand");
+            }
+            if model.is_block_list_empty() {
+                ctx.set.insert("TerminalView_EmptyBlockList");
+            } else {
+                ctx.set.insert("TerminalView_NonEmptyBlockList");
+            }
+            return ctx;
+        }
         let ai_settings = AISettings::as_ref(app);
 
         if self.is_voltron_open {
@@ -16380,6 +17046,7 @@ impl View for Input {
         }
 
         if self
+            .hosted_ui()
             .buy_credits_banner
             .as_ref(app)
             .is_denomination_dropdown_open(app)
@@ -16432,6 +17099,9 @@ impl View for Input {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
+        if self.hosted_ui.is_none() {
+            return self.render_classic_input(app);
+        }
         if CLIAgentSessionsModel::as_ref(app).is_input_open(self.terminal_view_id) {
             return self.render_cli_agent_input(app);
         }

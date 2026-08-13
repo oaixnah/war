@@ -1,0 +1,97 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ "$#" -ne 1 ]]; then
+  echo "Usage: $0 /path/to/War.app" >&2
+  exit 2
+fi
+
+APP_PATH="${1%/}"
+PLIST_PATH="$APP_PATH/Contents/Info.plist"
+WORKSPACE_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+if [[ "$(basename "$APP_PATH")" != "War.app" ]]; then
+  echo "Expected a War.app bundle, got: $APP_PATH" >&2
+  exit 1
+fi
+if [[ ! -f "$PLIST_PATH" ]]; then
+  echo "Missing bundle Info.plist: $PLIST_PATH" >&2
+  exit 1
+fi
+
+assert_plist_value() {
+  local key="$1"
+  local expected="$2"
+  local actual
+
+  if ! actual="$(plutil -extract "$key" raw -o - "$PLIST_PATH")"; then
+    echo "Missing required Info.plist key: $key" >&2
+    exit 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "Unexpected $key: expected '$expected', got '$actual'" >&2
+    exit 1
+  fi
+}
+
+assert_plist_value CFBundleDisplayName "War"
+assert_plist_value CFBundleName "War"
+assert_plist_value CFBundleExecutable "war"
+assert_plist_value CFBundleIdentifier "tech.oaix.War"
+assert_plist_value CFBundleURLTypes.0.CFBundleURLSchemes.0 "war"
+assert_plist_value NSHumanReadableCopyright "Copyright 2026 oaix"
+
+PLIST_XML="$(plutil -convert xml1 -o - "$PLIST_PATH")"
+for inherited_identity in WarpOss warp-oss warposs dev.warp.WarpOss; do
+  if [[ "$PLIST_XML" == *"$inherited_identity"* ]]; then
+    echo "Inherited Warp OSS identity '$inherited_identity' found in $PLIST_PATH" >&2
+    exit 1
+  fi
+done
+
+for excluded_key in \
+  CFBundleDocumentTypes \
+  NSServices \
+  NSDockTilePlugIn \
+  SUPPORTS_CHAT_GPT_WORK_WITH_APPS \
+  NSAppleEventsUsageDescription \
+  NSCameraUsageDescription \
+  NSMicrophoneUsageDescription \
+  NSContactsUsageDescription \
+  NSCalendarsUsageDescription \
+  NSCalendarsFullAccessUsageDescription \
+  NSRemindersUsageDescription \
+  NSRemindersFullAccessUsageDescription \
+  NSLocationUsageDescription \
+  NSPhotoLibraryUsageDescription; do
+  if plutil -extract "$excluded_key" raw -o - "$PLIST_PATH" >/dev/null 2>&1; then
+    echo "Excluded Info.plist key '$excluded_key' found in $PLIST_PATH" >&2
+    exit 1
+  fi
+done
+
+if [[ -d "$APP_PATH/Contents/PlugIns/WarpDockTilePlugin.docktileplugin" ]]; then
+  echo "Inherited Warp DockTilePlugin found in $APP_PATH" >&2
+  exit 1
+fi
+
+for entitlements_path in \
+  "$WORKSPACE_ROOT_DIR/script/Entitlements.plist" \
+  "$WORKSPACE_ROOT_DIR/script/Debug-Entitlements.plist"; do
+  for excluded_entitlement in \
+    com.apple.security.application-groups \
+    com.apple.security.device.audio-input \
+    com.apple.security.device.camera \
+    com.apple.security.personal-information.addressbook \
+    com.apple.security.personal-information.calendars \
+    com.apple.security.personal-information.location \
+    com.apple.security.personal-information.photos-library; do
+    if plutil -extract "$excluded_entitlement" raw -o - "$entitlements_path" >/dev/null 2>&1; then
+      echo "Excluded entitlement '$excluded_entitlement' found in $entitlements_path" >&2
+      exit 1
+    fi
+  done
+done
+
+echo "War bundle identity is valid: $APP_PATH"

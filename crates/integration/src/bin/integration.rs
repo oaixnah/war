@@ -24,33 +24,63 @@ pub struct Args {
 }
 
 pub fn main() -> Result<()> {
+    let args = Args::parse();
+    let use_local_app = args.integration_test_name.as_deref() == Some("test_local_offline_startup")
+        || std::env::var_os("WAR_LOCAL_APP_INTEGRATION").is_some();
+    if std::env::var_os("WAR_LOCAL_APP_INTEGRATION").is_some() {
+        // Do not expose this test-runner marker to the user's shell or other child processes.
+        unsafe { std::env::remove_var("WAR_LOCAL_APP_INTEGRATION") };
+    }
+    if use_local_app {
+        warp::disable_local_app_networking_and_telemetry();
+    }
     ChannelState::set(ChannelState::new(
-        Channel::Integration,
+        if use_local_app {
+            Channel::Oss
+        } else {
+            Channel::Integration
+        },
         ChannelConfig {
-            app_id: AppId::new(
-                "dev",
-                "warp",
-                if cfg!(target_os = "macos") {
-                    "Warp-Integration"
-                } else {
-                    "WarpIntegration"
-                },
-            ),
-            logfile_name: "warp_integration.log".into(),
-            server_config: WarpServerConfig {
-                firebase_auth_api_key: "".into(),
-                iap_config: None,
-                // Use an IP in the IANA testing range, with the TCP discard port, to
-                // black-hole server traffic.
-                server_root_url: "http://192.0.2.0:9".into(),
-                rtc_server_url: "ws://192.0.2.0:9/graphql/v2".into(),
-                session_sharing_server_url: None,
+            app_id: if use_local_app {
+                AppId::new("tech", "oaix", "War")
+            } else {
+                AppId::new(
+                    "dev",
+                    "warp",
+                    if cfg!(target_os = "macos") {
+                        "Warp-Integration"
+                    } else {
+                        "WarpIntegration"
+                    },
+                )
             },
-            oz_config: OzConfig {
-                // Use an IP in the IANA testing range, with the TCP discard port, to
-                // black-hole server traffic.
-                oz_root_url: "http://192.0.2.0:9".into(),
-                workload_audience_url: None,
+            logfile_name: if use_local_app {
+                "war.log".into()
+            } else {
+                "warp_integration.log".into()
+            },
+            server_config: if use_local_app {
+                WarpServerConfig::production()
+            } else {
+                WarpServerConfig {
+                    firebase_auth_api_key: "".into(),
+                    iap_config: None,
+                    // Use an IP in the IANA testing range, with the TCP discard port, to
+                    // black-hole server traffic.
+                    server_root_url: "http://192.0.2.0:9".into(),
+                    rtc_server_url: "ws://192.0.2.0:9/graphql/v2".into(),
+                    session_sharing_server_url: None,
+                }
+            },
+            oz_config: if use_local_app {
+                OzConfig::production()
+            } else {
+                OzConfig {
+                    // Use an IP in the IANA testing range, with the TCP discard port, to
+                    // black-hole server traffic.
+                    oz_root_url: "http://192.0.2.0:9".into(),
+                    workload_audience_url: None,
+                }
             },
             telemetry_config: None,
             crash_reporting_config: None,
@@ -58,8 +88,6 @@ pub fn main() -> Result<()> {
             mcp_static_config: None,
         },
     ));
-
-    let args = Args::parse();
 
     if let Some(command) = &args.command {
         match command {
@@ -107,7 +135,11 @@ pub fn main() -> Result<()> {
     }
 
     #[cfg_attr(not(unix), allow(unreachable_code))]
-    warp::run_integration_test(driver)
+    if use_local_app {
+        warp::run_local_app_integration_test(driver)
+    } else {
+        warp::run_integration_test(driver)
+    }
 }
 
 /// Type of a function that produces an integration test builder.
@@ -128,6 +160,7 @@ fn register_tests() -> HashMap<&'static str, BoxedBuilderFn> {
 
     // Add new tests here
     register_test!(test_single_command);
+    register_test!(test_local_offline_startup);
     register_test!(test_add_and_close_session);
     register_test!(test_add_many_sessions);
     register_test!(test_ctrl_tab_session_switching);

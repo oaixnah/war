@@ -149,7 +149,9 @@ macro_rules! send_telemetry_from_ctx {
         #[allow(unused_imports)]
         use warp_core::telemetry::TelemetryEvent as _;
         let event = $event;
-        if event.enablement_state().is_enabled() {
+        if event.enablement_state().is_enabled()
+            && $ctx.has_singleton_model::<$crate::telemetry::TelemetryContextModel>()
+        {
             let auth_state =
                 <$crate::telemetry::TelemetryContextModel as $crate::warpui_core::SingletonEntity>::handle($ctx)
                     .as_ref($ctx);
@@ -176,7 +178,9 @@ macro_rules! send_telemetry_from_ctx {
 macro_rules! send_telemetry_from_app_ctx {
     ($event:expr, $app_ctx:expr) => {
         let event = $event;
-        if event.enablement_state().is_enabled() {
+        if event.enablement_state().is_enabled()
+            && $app_ctx.has_singleton_model::<$crate::telemetry::TelemetryContextModel>()
+        {
             let auth_state =
                 <$crate::telemetry::TelemetryContextModel as $crate::warpui_core::SingletonEntity>::handle(
                     $app_ctx,

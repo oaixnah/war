@@ -12,6 +12,8 @@
 mod imp;
 mod sink_map_err;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::anyhow;
 #[cfg(not(target_family = "wasm"))]
 pub use async_tungstenite::tungstenite;
@@ -25,6 +27,13 @@ use itertools::Itertools;
 use thiserror::Error;
 
 use crate::sink_map_err::map_err;
+
+static OUTBOUND_CONNECTIONS_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Permanently blocks websocket connections for the current process.
+pub fn disable_outbound_connections() {
+    OUTBOUND_CONNECTIONS_ENABLED.store(false, Ordering::Release);
+}
 
 // Unfortunately, `anyhow::Error` does not implement `std::error::Error`, which is required by the
 // `WebsocketMessage`. To workaround this, we implement a wrapper around `anyhow::Error` using
@@ -106,6 +115,9 @@ impl WebSocket {
         request: impl IntoClientRequest,
         protocols: impl IntoIterator<Item = &str>,
     ) -> anyhow::Result<Self> {
+        if !OUTBOUND_CONNECTIONS_ENABLED.load(Ordering::Acquire) {
+            anyhow::bail!("outbound websocket connections are disabled");
+        }
         let mut request = request.into_client_request()?;
         let protocols = protocols.into_iter().join(", ");
         if !protocols.is_empty() {
@@ -123,6 +135,9 @@ impl WebSocket {
         url: impl AsRef<str>,
         protocols: impl IntoIterator<Item = &str>,
     ) -> anyhow::Result<Self> {
+        if !OUTBOUND_CONNECTIONS_ENABLED.load(Ordering::Acquire) {
+            anyhow::bail!("outbound websocket connections are disabled");
+        }
         let socket = imp::connect(url, protocols).await?;
         Ok(Self(socket))
     }
@@ -200,3 +215,7 @@ pub trait Stream: futures::Stream<Item = Result<Message, Error>> + Send + Unpin 
 impl<T> Sink for T where T: futures::Sink<Message, Error = Error> + Send + Unpin + 'static {}
 impl<T> Stream for T where T: futures::Stream<Item = Result<Message, Error>> + Send + Unpin + 'static
 {}
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

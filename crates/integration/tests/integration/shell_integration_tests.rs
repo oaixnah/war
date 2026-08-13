@@ -12,6 +12,8 @@ use super::integration_tests;
 integration_tests! {
     // Test command execution works.
     test_single_command,
+    // The production local War composition must bootstrap every supported MVP shell offline.
+    test_local_offline_startup,
     // Test shell process terminates when session is closed.
     test_add_and_close_session,
     // Test powerlevel10k detection (via bootstrap script logic).

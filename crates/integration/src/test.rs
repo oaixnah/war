@@ -465,6 +465,13 @@ pub fn test_single_command() -> Builder {
         .with_step(execute_echo(0))
 }
 
+/// Proves the production local War composition reaches a bootstrapped shell and command block.
+pub fn test_local_offline_startup() -> Builder {
+    new_builder()
+        .with_step(wait_until_bootstrapped_single_pane_for_tab(0))
+        .with_step(execute_echo(0))
+}
+
 pub fn test_open_and_close_settings() -> Builder {
     new_builder()
         .with_step(wait_until_bootstrapped_single_pane_for_tab(0))

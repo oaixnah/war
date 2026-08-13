@@ -1,6 +1,7 @@
 mod event_store;
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 use event_store::*;
@@ -11,6 +12,14 @@ use serde_json::Value;
 
 lazy_static! {
     static ref TELEMETRY: Mutex<EventStore> = Mutex::new(EventStore::new());
+}
+
+static TELEMETRY_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Permanently disables telemetry collection for the current process and clears queued events.
+pub fn disable() {
+    TELEMETRY_ENABLED.store(false, Ordering::Release);
+    TELEMETRY.lock().events.clear();
 }
 
 #[macro_export]
@@ -80,6 +89,9 @@ pub fn record_event(
     contains_ugc: bool,
     timestamp: DateTime<Utc>,
 ) {
+    if !TELEMETRY_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
     let mut telemetry = TELEMETRY.lock();
     telemetry.record_event(
         user_id,
@@ -92,6 +104,9 @@ pub fn record_event(
 }
 
 pub fn record_identify_user_event(user_id: String, anonymous_id: String, timestamp: DateTime<Utc>) {
+    if !TELEMETRY_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
     let mut telemetry = TELEMETRY.lock();
     telemetry.record_identify_user_event(user_id, anonymous_id, timestamp);
 }
@@ -103,6 +118,9 @@ pub fn record_app_active_event(
     anonymous_id: String,
     timestamp: DateTime<Utc>,
 ) {
+    if !TELEMETRY_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
     let mut telemetry = TELEMETRY.lock();
     telemetry.record_app_active(user_id, anonymous_id, timestamp);
 }
@@ -110,3 +128,7 @@ pub fn record_app_active_event(
 pub fn flush_events() -> Vec<Event> {
     TELEMETRY.lock().events.drain(..).collect()
 }
+
+#[cfg(test)]
+#[path = "telemetry_tests.rs"]
+mod tests;
