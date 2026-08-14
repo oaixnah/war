@@ -121,10 +121,13 @@ impl PaneNodeSnapshot {
 
     fn is_local_terminal_only(&self) -> bool {
         match self {
-            PaneNodeSnapshot::Branch(branch) => branch
-                .children
-                .iter()
-                .all(|(_, child)| child.is_local_terminal_only()),
+            PaneNodeSnapshot::Branch(branch) => {
+                !branch.children.is_empty()
+                    && branch
+                        .children
+                        .iter()
+                        .all(|(_, child)| child.is_local_terminal_only())
+            }
             PaneNodeSnapshot::Leaf(leaf) => match &leaf.contents {
                 LeafContents::Terminal(terminal) => terminal.is_local_terminal_only(),
                 LeafContents::Notebook(_)

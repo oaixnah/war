@@ -10,6 +10,7 @@ use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;
 use warp_core::features::FeatureFlag;
 use warp_graphql::scalars::time::ServerTimestamp;
+use warpui::App;
 
 use super::{
     app_database_file_path, database_file_path_for_current_scope, database_file_path_for_scope,
@@ -17,8 +18,9 @@ use super::{
     read_sqlite_data, save_app_state, save_codebase_index_metadata, setup_database, start_writer,
 };
 use crate::app_state::{
-    AppState, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents, LeafSnapshot, PaneNodeSnapshot,
-    TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+    AppState, BranchSnapshot, CodePaneSnapShot, CodePaneTabSnapshot, LeafContents, LeafSnapshot,
+    PaneNodeSnapshot, SplitDirection, TabGroupSnapshot, TabSnapshot, TerminalPaneSnapshot,
+    WindowSnapshot,
 };
 use crate::auth::UserUid;
 use crate::cloud_object::{CloudObjectPermissions, Owner};
@@ -167,6 +169,184 @@ fn sqlite_read_restores_app_state_and_codebase_metadata() {
 }
 
 #[test]
+fn persistence_read_failure_does_not_start_writer() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+    conn.batch_execute("DROP TABLE windows;")
+        .expect("restoration table should be removed");
+    drop(conn);
+
+    super::with_test_app_database_file_path(database_path, || {
+        App::test((), |mut app| async move {
+            let (persisted_data, writer_handles) = app.update(|ctx| {
+                super::initialize(ctx, PersistenceScope::App, PersistedDataScope::LocalApp)
+            });
+
+            assert!(persisted_data.is_none());
+            assert!(writer_handles.is_none());
+        });
+    });
+}
+
+#[test]
+fn invalid_local_restoration_does_not_start_writer() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+    let mut window = test_terminal_window_snapshot(false);
+    window.tabs[0].root = PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Vertical,
+        children: vec![],
+    });
+    save_app_state(
+        &mut conn,
+        &AppState {
+            windows: vec![window],
+            active_window_index: Some(0),
+            block_lists: Default::default(),
+            running_mcp_servers: Default::default(),
+        },
+    )
+    .expect("invalid local restoration fixture should save");
+    drop(conn);
+
+    super::with_test_app_database_file_path(database_path, || {
+        App::test((), |mut app| async move {
+            let (persisted_data, writer_handles) = app.update(|ctx| {
+                super::initialize(ctx, PersistenceScope::App, PersistedDataScope::LocalApp)
+            });
+
+            assert!(persisted_data.is_none());
+            assert!(writer_handles.is_none());
+        });
+    });
+}
+
+#[test]
+fn lossy_local_restoration_does_not_start_writer() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+    save_app_state(
+        &mut conn,
+        &AppState {
+            windows: vec![test_terminal_window_snapshot(false)],
+            active_window_index: Some(0),
+            block_lists: Default::default(),
+            running_mcp_servers: Default::default(),
+        },
+    )
+    .expect("local restoration fixture should save");
+    conn.batch_execute("UPDATE terminal_panes SET shell_launch_data = 'invalid-json';")
+        .expect("pane restoration field should be corrupted");
+    drop(conn);
+
+    super::with_test_app_database_file_path(database_path, || {
+        App::test((), |mut app| async move {
+            let (persisted_data, writer_handles) = app.update(|ctx| {
+                super::initialize(ctx, PersistenceScope::App, PersistedDataScope::LocalApp)
+            });
+
+            assert!(persisted_data.is_none());
+            assert!(writer_handles.is_none());
+        });
+    });
+}
+
+#[test]
+fn malformed_local_tab_color_does_not_start_writer() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+    save_app_state(
+        &mut conn,
+        &AppState {
+            windows: vec![test_terminal_window_snapshot(false)],
+            active_window_index: Some(0),
+            block_lists: Default::default(),
+            running_mcp_servers: Default::default(),
+        },
+    )
+    .expect("local restoration fixture should save");
+    conn.batch_execute("UPDATE tabs SET color = 'invalid: [yaml';")
+        .expect("tab color should be corrupted");
+    drop(conn);
+
+    super::with_test_app_database_file_path(database_path, || {
+        App::test((), |mut app| async move {
+            let (persisted_data, writer_handles) = app.update(|ctx| {
+                super::initialize(ctx, PersistenceScope::App, PersistedDataScope::LocalApp)
+            });
+
+            assert!(persisted_data.is_none());
+            assert!(writer_handles.is_none());
+        });
+    });
+}
+
+#[test]
+fn local_app_writer_preserves_excluded_mcp_state() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let database_path = tempdir.path().join("warp.sqlite");
+    let mcp_server_id = uuid::Uuid::from_u128(1);
+    let local_app_state = AppState {
+        windows: vec![test_terminal_window_snapshot(false)],
+        active_window_index: Some(0),
+        block_lists: Default::default(),
+        running_mcp_servers: Default::default(),
+    };
+    let mut conn = setup_database(&database_path).expect("database should initialize");
+    save_app_state(
+        &mut conn,
+        &AppState {
+            running_mcp_servers: vec![mcp_server_id],
+            ..local_app_state.clone()
+        },
+    )
+    .expect("MCP restoration fixture should save");
+    drop(conn);
+
+    super::with_test_app_database_file_path(database_path.clone(), || {
+        App::test((), |mut app| async move {
+            let (persisted_data, writer_handles) = app.update(|ctx| {
+                super::initialize(ctx, PersistenceScope::App, PersistedDataScope::LocalApp)
+            });
+            let restored = persisted_data.expect("local data should restore");
+            assert!(
+                restored
+                    .app_state
+                    .expect("local app state should restore")
+                    .running_mcp_servers
+                    .is_empty()
+            );
+
+            let writer = writer_handles.expect("local writer should start");
+            writer
+                .sender
+                .send(ModelEvent::Snapshot(local_app_state))
+                .expect("local snapshot should send");
+            writer
+                .sender
+                .send(ModelEvent::Terminate)
+                .expect("writer termination should send");
+            writer.handle.join().expect("writer should terminate");
+        });
+    });
+
+    let mut conn = setup_database(&database_path).expect("database should reopen");
+    let restored = read_sqlite_data(&mut conn, None, PersistedDataScope::Full)
+        .expect("full data should restore");
+    assert_eq!(
+        restored
+            .app_state
+            .expect("app state should restore")
+            .running_mcp_servers,
+        vec![mcp_server_id]
+    );
+}
+
+#[test]
 fn local_app_scope_restores_only_local_session_and_command_history() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let database_path = tempdir.path().join("warp.sqlite");
@@ -182,7 +362,8 @@ fn local_app_scope_restores_only_local_session_and_command_history() {
     save_codebase_index_metadata(&mut conn, test_codebase_metadata("/tmp/cloud-index"))
         .expect("codebase metadata should save");
 
-    let writer = start_writer(conn, database_path.clone()).expect("writer should start");
+    let writer = start_writer(conn, database_path.clone(), PersistedDataScope::Full)
+        .expect("writer should start");
     writer
         .sender
         .send(ModelEvent::InsertCommand {
@@ -219,17 +400,16 @@ fn local_app_scope_restores_only_local_session_and_command_history() {
     writer.handle.join().expect("writer should terminate");
 
     let mut conn = setup_database(&database_path).expect("database should reopen");
+    conn.batch_execute("DROP TABLE active_mcp_servers;")
+        .expect("excluded MCP restoration table should be removed");
     let restored = read_sqlite_data(&mut conn, None, PersistedDataScope::LocalApp)
         .expect("local app data should load");
+    let restored_app_state = restored
+        .app_state
+        .as_ref()
+        .expect("local session state should be restored");
 
-    assert_eq!(
-        restored
-            .app_state
-            .expect("local session state should be restored")
-            .windows
-            .len(),
-        1
-    );
+    assert_eq!(restored_app_state.windows.len(), 1);
     assert_eq!(restored.command_history.len(), 1);
     assert_eq!(restored.command_history[0].command, "pwd");
     assert!(restored.cloud_objects.is_empty());
@@ -239,6 +419,7 @@ fn local_app_scope_restores_only_local_session_and_command_history() {
     assert!(restored.codebase_indices.is_empty());
     assert!(restored.multi_agent_conversations.is_empty());
     assert!(restored.projects.is_empty());
+    assert!(restored_app_state.running_mcp_servers.is_empty());
 }
 
 /// Mirrors `init_db(&PersistenceScope::Tui)` in an isolated tempdir: the TUI
@@ -259,7 +440,8 @@ fn tui_database_in_tui_subdirectory_round_trips_data() {
     let metadata = test_codebase_metadata("/tmp/tui-repo");
     save_codebase_index_metadata(&mut conn, metadata.clone())
         .expect("codebase index metadata should save");
-    let writer = start_writer(conn, database_path.clone()).expect("writer should start");
+    let writer = start_writer(conn, database_path.clone(), PersistedDataScope::TuiFrontend)
+        .expect("writer should start");
     writer
         .sender
         .send(ModelEvent::InsertCommand {
@@ -320,7 +502,8 @@ fn sqlite_writer_reuses_codebase_index_metadata_events() {
     let database_path = tempdir.path().join("warp.sqlite");
     let conn = setup_database(&database_path).expect("database should initialize");
 
-    let writer = start_writer(conn, database_path.clone()).expect("writer should start");
+    let writer = start_writer(conn, database_path.clone(), PersistedDataScope::Full)
+        .expect("writer should start");
     let metadata = test_codebase_metadata("/tmp/writer-repo");
     writer
         .sender
@@ -339,7 +522,8 @@ fn sqlite_writer_reuses_codebase_index_metadata_events() {
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].path, metadata.path);
 
-    let writer = start_writer(conn, database_path.clone()).expect("writer should restart");
+    let writer = start_writer(conn, database_path.clone(), PersistedDataScope::Full)
+        .expect("writer should restart");
     writer
         .sender
         .send(ModelEvent::DeleteCodebaseIndexMetadata {

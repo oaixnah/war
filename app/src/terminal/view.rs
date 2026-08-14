@@ -3037,12 +3037,9 @@ impl TerminalView {
         });
         let slow_bootstrap_banner = ctx.add_typed_action_view(|_| {
             Banner::<TerminalAction>::new_with_buttons(
-                BannerTextContent::formatted_text(vec![
-                    FormattedTextFragment::plain_text(
-                        "Seems like your shell is taking a while to start...  ",
-                    ),
-                    FormattedTextFragment::hyperlink("More info", KNOWN_ISSUES_URL),
-                ]),
+                BannerTextContent::plain_text(
+                    "Your shell is taking longer than expected to start.".to_owned(),
+                ),
                 vec![BannerTextButton::new(
                     "Show initialization block".to_string(),
                     Rc::new(|event_ctx, _ctx, _position| {

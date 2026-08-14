@@ -3086,15 +3086,20 @@ impl PaneGroup {
             ctx.notify();
         });
 
-        let user_default_shell_changed_banner = ctx.add_typed_action_view(|_| {
-            Banner::<PaneGroupAction>::new_permanently_dismissible(
-                BannerTextContent::formatted_text(vec![
-                    FormattedTextFragment::plain_text(
-                        "Warp doesn't currently support your default shell, falling back to zsh.  ",
-                    ),
-                    FormattedTextFragment::hyperlink("Learn more", WARP_SHELL_COMPATIBILITY_DOCS),
-                ]),
+        let unsupported_shell_content = if server_api.is_none() {
+            BannerTextContent::plain_text(
+                "War doesn't currently support your default shell, falling back to zsh.".to_owned(),
             )
+        } else {
+            BannerTextContent::formatted_text(vec![
+                FormattedTextFragment::plain_text(
+                    "Warp doesn't currently support your default shell, falling back to zsh.  ",
+                ),
+                FormattedTextFragment::hyperlink("Learn more", WARP_SHELL_COMPATIBILITY_DOCS),
+            ])
+        };
+        let user_default_shell_changed_banner = ctx.add_typed_action_view(move |_| {
+            Banner::<PaneGroupAction>::new_permanently_dismissible(unsupported_shell_content)
         });
 
         ctx.subscribe_to_model(&GeneralSettings::handle(ctx), |me, _, event, ctx| {

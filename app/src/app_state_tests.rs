@@ -87,6 +87,16 @@ fn hosted_or_agent_state_is_not_safe_to_restore() {
 }
 
 #[test]
+fn empty_pane_branch_is_not_safe_to_restore() {
+    let window = window_with_root(PaneNodeSnapshot::Branch(BranchSnapshot {
+        direction: SplitDirection::Vertical,
+        children: vec![],
+    }));
+
+    assert!(!window.is_local_terminal_only());
+}
+
+#[test]
 fn test_has_horizontal_split() {
     let single_leaf = PaneNodeSnapshot::Leaf(LeafSnapshot {
         is_focused: false,

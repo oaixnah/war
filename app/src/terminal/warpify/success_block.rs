@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use channel_versions::overrides::TargetOS;
 use parking_lot::RwLock;
+use warp_core::channel::{Channel, ChannelState};
 use warp_core::semantic_selection::SemanticSelection;
 use warp_core::ui::theme::WarpTheme;
 use warpui::elements::{
@@ -108,10 +109,17 @@ impl WarpifySuccessBlock {
                 })
             })
         };
+        let is_local_war = ChannelState::channel() == Channel::Oss;
         let auto_warpify_snippet = auto_warpify_snippet.map(|(output_grid, can_write_to_rc)| {
             AutoWarpifySnippet {
                 description: (if !output_grid.is_empty() {
-                    "Run the following to automatically Warpify in the future:"
+                    if is_local_war {
+                        "Run the following to enable shell integration automatically in the future:"
+                    } else {
+                        "Run the following to automatically Warpify in the future:"
+                    }
+                } else if is_local_war {
+                    "In remote subshells, War runs background commands to power local terminal features."
                 } else {
                     "In remote subshells, Warp runs commands in the background to power completions, syntax highlighting, and other features."
                 }).into(),
@@ -150,20 +158,36 @@ impl WarpifySuccessBlock {
     }
 
     pub fn render_title_ui(&self, theme: &WarpTheme, appearance: &Appearance) -> Box<dyn Element> {
+        let is_local_war = ChannelState::channel() == Channel::Oss;
         let header_contents = render::build_header_row(
-            "Session Warpified",
-            Icon::new(UiIcon::Warp.into(), theme.active_ui_detail()),
+            if is_local_war {
+                "Shell integration enabled"
+            } else {
+                "Session Warpified"
+            },
+            Icon::new(
+                if is_local_war {
+                    UiIcon::CheckSkinny.into()
+                } else {
+                    UiIcon::Warp.into()
+                },
+                theme.active_ui_detail(),
+            ),
             theme,
             appearance,
         )
         .with_margin_right(8.)
         .finish();
-        let header_contents = Container::new(
-            Flex::row()
-                .with_children([header_contents, self.render_learn_more_link(appearance)])
-                .finish(),
-        )
-        .finish();
+        let header_contents = if is_local_war {
+            header_contents
+        } else {
+            Container::new(
+                Flex::row()
+                    .with_children([header_contents, self.render_learn_more_link(appearance)])
+                    .finish(),
+            )
+            .finish()
+        };
 
         Container::new(
             Flex::row()

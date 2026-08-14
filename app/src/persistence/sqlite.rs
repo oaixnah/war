@@ -158,9 +158,12 @@ pub fn initialize(
     let database_path = database_file_path_for_scope(&scope);
     match init_db(&scope) {
         Ok(mut conn) => {
-            let mut persisted_data = read_persisted_data(&mut conn, ctx, data_scope);
+            let mut persisted_data = match read_persisted_data(&mut conn, ctx, data_scope) {
+                Ok(persisted_data) => persisted_data,
+                Err(_) => return (None, None),
+            };
 
-            let writer_handles = match start_writer(conn, database_path.clone()) {
+            let writer_handles = match start_writer(conn, database_path.clone(), data_scope) {
                 Ok(writer_handles) => Some(writer_handles),
                 Err(err) => {
                     send_telemetry_from_app_ctx!(
@@ -206,17 +209,18 @@ fn read_persisted_data(
     conn: &mut SqliteConnection,
     ctx: &mut AppContext,
     data_scope: PersistedDataScope,
-) -> Option<Box<PersistedData>> {
+) -> Result<Option<Box<PersistedData>>> {
     let user_uid = ctx
         .has_singleton_model::<AuthStateProvider>()
         .then(|| AuthStateProvider::as_ref(ctx).get().user_id())
         .flatten();
     match read_sqlite_data(conn, user_uid, data_scope) {
-        Ok(app_state) => Some(Box::new(app_state)),
+        Ok(app_state) => Ok(Some(Box::new(app_state))),
         Err(err) => {
             send_telemetry_from_app_ctx!(TelemetryEvent::DatabaseReadError(err.to_string()), ctx);
-            report_error!(anyhow::Error::new(err).context("Failed to read persisted data"));
-            None
+            let err = anyhow::Error::new(err).context("Failed to read persisted data");
+            report_error!(&err);
+            Err(err)
         }
     }
 }
@@ -575,7 +579,11 @@ fn reconstruct_database(path: &Path) -> Result<SqliteConnection> {
     setup_database(path)
 }
 
-fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<WriterHandles> {
+fn start_writer(
+    conn: SqliteConnection,
+    database_path: PathBuf,
+    data_scope: PersistedDataScope,
+) -> Result<WriterHandles> {
     let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
     let mut current_conn = conn;
     let handle = thread::Builder::new()
@@ -636,7 +644,9 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
                                 log::info!("Ignoring event as SQLite Writer is on pause");
                                 continue;
                             }
-                            if let Err(err) = handle_model_event(event, &mut current_conn) {
+                            if let Err(err) =
+                                handle_model_event(event, &mut current_conn, data_scope)
+                            {
                                 report_db_error("Model", err, &database_path);
                             }
                         }
@@ -652,7 +662,11 @@ fn start_writer(conn: SqliteConnection, database_path: PathBuf) -> Result<Writer
 /// * [`ModelEvent::PauseAndRemoveDatabase`]
 /// * [`ModelEvent::ReconstructAndResume`]
 /// * [`ModelEvent::Terminate`]
-fn handle_model_event(event: ModelEvent, connection: &mut SqliteConnection) -> anyhow::Result<()> {
+fn handle_model_event(
+    event: ModelEvent,
+    connection: &mut SqliteConnection,
+    data_scope: PersistedDataScope,
+) -> anyhow::Result<()> {
     match event {
         ModelEvent::PauseAndRemoveDatabase
         | ModelEvent::ReconstructAndResume
@@ -670,7 +684,8 @@ fn handle_model_event(event: ModelEvent, connection: &mut SqliteConnection) -> a
             delete_blocks(connection, pane_id).context("error deleting blocks")
         }
         ModelEvent::Snapshot(app_state) => {
-            save_app_state(connection, &app_state).context("error saving app state")
+            save_app_state_for_scope(connection, &app_state, data_scope)
+                .context("error saving app state")
         }
         ModelEvent::UpsertWorkflows(workflows) => {
             upsert_workflows(connection, workflows).context("error saving workflows")
@@ -940,7 +955,16 @@ struct SaveAppStateNodeTraversal<'a> {
 
 // Saves the app state snapshot in the sqlite database. Removes any old app state.
 // Does so in a transaction so we're never in a partial state.
+#[cfg(test)]
 fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<()> {
+    save_app_state_for_scope(conn, app_state, PersistedDataScope::Full)
+}
+
+fn save_app_state_for_scope(
+    conn: &mut SqliteConnection,
+    app_state: &AppState,
+    data_scope: PersistedDataScope,
+) -> Result<()> {
     conn.transaction::<(), Error, _>(|conn| {
         // Remove old app state
         diesel::delete(schema::app::dsl::app).execute(conn)?;
@@ -962,7 +986,9 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
         diesel::delete(schema::tabs::dsl::tabs).execute(conn)?;
         diesel::delete(schema::tab_groups::dsl::tab_groups).execute(conn)?;
         diesel::delete(schema::windows::dsl::windows).execute(conn)?;
-        diesel::delete(schema::active_mcp_servers::dsl::active_mcp_servers).execute(conn)?;
+        if !matches!(data_scope, PersistedDataScope::LocalApp) {
+            diesel::delete(schema::active_mcp_servers::dsl::active_mcp_servers).execute(conn)?;
+        }
         diesel::delete(schema::panels::dsl::panels).execute(conn)?;
 
         let mut active_window_id = None;
@@ -1192,19 +1218,20 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
             .values(new_app)
             .execute(conn)?;
 
-        // Save active MCP servers
-        let active_mcp_servers: Vec<NewActiveMCPServer> = app_state
-            .running_mcp_servers
-            .iter()
-            .map(|uuid| NewActiveMCPServer {
-                mcp_server_uuid: uuid.to_string(),
-            })
-            .collect();
+        if !matches!(data_scope, PersistedDataScope::LocalApp) {
+            let active_mcp_servers: Vec<NewActiveMCPServer> = app_state
+                .running_mcp_servers
+                .iter()
+                .map(|uuid| NewActiveMCPServer {
+                    mcp_server_uuid: uuid.to_string(),
+                })
+                .collect();
 
-        if !active_mcp_servers.is_empty() {
-            diesel::insert_into(schema::active_mcp_servers::dsl::active_mcp_servers)
-                .values(active_mcp_servers)
-                .execute(conn)?;
+            if !active_mcp_servers.is_empty() {
+                diesel::insert_into(schema::active_mcp_servers::dsl::active_mcp_servers)
+                    .values(active_mcp_servers)
+                    .execute(conn)?;
+            }
         }
 
         Ok(())
@@ -2195,39 +2222,79 @@ fn upsert_generic_string_objects(
     upsert_generic_string_object_rows(conn, objects)
 }
 
+fn parse_optional_restoration_field<T>(
+    serialized: Option<String>,
+    data_scope: PersistedDataScope,
+    field_name: &'static str,
+) -> Result<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let Some(serialized) = serialized else {
+        return Ok(None);
+    };
+    match serde_json::from_str(&serialized) {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if matches!(data_scope, PersistedDataScope::LocalApp) => {
+            Err(anyhow!(err).context(format!("failed to parse persisted {field_name}")))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Parse conversation IDs from JSON string.
-fn parse_conversation_ids(ids_json: &Option<String>) -> Vec<AIConversationId> {
+fn parse_conversation_ids(
+    ids_json: &Option<String>,
+    data_scope: PersistedDataScope,
+) -> Result<Vec<AIConversationId>> {
     let Some(ids_str) = ids_json.as_ref() else {
-        return vec![];
+        return Ok(vec![]);
     };
 
     let Ok(id_strings) = serde_json::from_str::<Vec<String>>(ids_str) else {
+        if matches!(data_scope, PersistedDataScope::LocalApp) {
+            bail!("failed to deserialize persisted conversation IDs");
+        }
         log::warn!("Failed to deserialize conversation IDs from column");
-        return vec![];
+        return Ok(vec![]);
     };
 
-    id_strings
+    let parsed = id_strings
         .into_iter()
         .map(AIConversationId::try_from)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|_| {
+        .collect::<Result<Vec<_>, _>>();
+    match parsed {
+        Ok(ids) => Ok(ids),
+        Err(_) if matches!(data_scope, PersistedDataScope::LocalApp) => {
+            bail!("failed to parse persisted conversation IDs")
+        }
+        Err(_) => {
             log::warn!("Failed to parse conversation IDs");
-            vec![]
-        })
+            Ok(vec![])
+        }
+    }
 }
 
-fn read_root_node(conn: &mut SqliteConnection, tab_id_val: i32) -> Result<PaneNodeSnapshot> {
+fn read_root_node(
+    conn: &mut SqliteConnection,
+    tab_id_val: i32,
+    data_scope: PersistedDataScope,
+) -> Result<PaneNodeSnapshot> {
     use schema::pane_nodes::dsl::*;
 
     let pane_node: model::PaneNode = schema::pane_nodes::dsl::pane_nodes
         .filter(tab_id.eq(tab_id_val))
         .filter(parent_pane_node_id.is_null())
         .first(conn)?;
-    read_node(conn, pane_node)
+    read_node(conn, pane_node, data_scope)
 }
 
 /// Reads a saved node back into a snapshot.
-fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneNodeSnapshot> {
+fn read_node(
+    conn: &mut SqliteConnection,
+    node: model::PaneNode,
+    data_scope: PersistedDataScope,
+) -> Result<PaneNodeSnapshot> {
     match node.is_leaf {
         true => {
             let pane = schema::pane_leaves::dsl::pane_leaves
@@ -2241,23 +2308,37 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
                         .select(model::TerminalPane::as_select())
                         .first(conn)?;
 
-                    let shell_launch_data: Option<ShellLaunchData> = terminal_pane
-                        .shell_launch_data
-                        .and_then(|shell_str| serde_json::from_str(&shell_str).ok());
-                    let input_config = terminal_pane
-                        .input_config
-                        .and_then(|config_str| serde_json::from_str(&config_str).ok());
-                    let active_profile_id = terminal_pane
-                        .active_profile_id
-                        .and_then(|profile_str| serde_json::from_str(&profile_str).ok());
+                    let shell_launch_data: Option<ShellLaunchData> =
+                        parse_optional_restoration_field(
+                            terminal_pane.shell_launch_data,
+                            data_scope,
+                            "shell launch data",
+                        )?;
+                    let input_config = parse_optional_restoration_field(
+                        terminal_pane.input_config,
+                        data_scope,
+                        "input configuration",
+                    )?;
+                    let active_profile_id = parse_optional_restoration_field(
+                        terminal_pane.active_profile_id,
+                        data_scope,
+                        "active profile ID",
+                    )?;
                     // Don't provide a fallback here - let the higher-level code with AppContext handle it
 
                     let conversation_ids_to_restore =
-                        parse_conversation_ids(&terminal_pane.conversation_ids);
+                        parse_conversation_ids(&terminal_pane.conversation_ids, data_scope)?;
 
-                    let active_conversation_id = terminal_pane
-                        .active_conversation_id
-                        .and_then(|id_str| AIConversationId::try_from(id_str).ok());
+                    let active_conversation_id = match terminal_pane.active_conversation_id {
+                        Some(id) => match AIConversationId::try_from(id) {
+                            Ok(id) => Some(id),
+                            Err(_) if matches!(data_scope, PersistedDataScope::LocalApp) => {
+                                bail!("failed to parse persisted active conversation ID")
+                            }
+                            Err(_) => None,
+                        },
+                        None => None,
+                    };
 
                     LeafContents::Terminal(TerminalPaneSnapshot {
                         uuid: terminal_pane.uuid,
@@ -2463,7 +2544,7 @@ fn read_node(conn: &mut SqliteConnection, node: model::PaneNode) -> Result<PaneN
             for child_node in child_nodes {
                 children.push((
                     PaneFlex(child_node.flex.unwrap_or(1.)),
-                    read_node(conn, child_node)?,
+                    read_node(conn, child_node, data_scope)?,
                 ));
             }
 
@@ -2564,6 +2645,7 @@ fn read_sqlite_data(
             .load::<TabGroup>(conn)?
             .grouped_by(&db_windows);
 
+        let mut local_restoration_was_lossy = false;
         let saved_windows: Vec<_> = db_windows
             .into_iter()
             .enumerate()
@@ -2578,11 +2660,18 @@ fn read_sqlite_data(
                     for group in tab_groups_for_window {
                         let tab_group_id = TabGroupId::new();
                         tab_group_id_by_row_id.insert(group.id, tab_group_id);
-                        let color = group
-                            .color
-                            .as_deref()
-                            .and_then(|s| serde_yaml::from_str::<SelectedTabColor>(s).ok())
-                            .unwrap_or_default();
+                        let color = match group.color.as_deref() {
+                            Some(serialized) => match serde_yaml::from_str(serialized) {
+                                Ok(color) => color,
+                                Err(_) => {
+                                    if matches!(data_scope, PersistedDataScope::LocalApp) {
+                                        local_restoration_was_lossy = true;
+                                    }
+                                    SelectedTabColor::default()
+                                }
+                            },
+                            None => SelectedTabColor::default(),
+                        };
                         tab_groups_snapshots.push(TabGroupSnapshot {
                             id: tab_group_id,
                             name: group.name,
@@ -2594,38 +2683,65 @@ fn read_sqlite_data(
                     let saved_tabs: Vec<_> = tabs_for_window
                         .into_iter()
                         .filter_map(|tab| {
-                            let root = read_root_node(conn, tab.id).ok()?;
+                            let root = match read_root_node(conn, tab.id, data_scope) {
+                                Ok(root) => root,
+                                Err(_) => {
+                                    if matches!(data_scope, PersistedDataScope::LocalApp) {
+                                        local_restoration_was_lossy = true;
+                                    }
+                                    return None;
+                                }
+                            };
                             let panel = db_panels.get(&tab.id);
 
-                            let left_panel = panel
-                                .and_then(|p| p.left_panel.as_ref())
-                                .and_then(|s| serde_json::from_str::<LeftPanelSnapshot>(s).ok());
+                            let left_panel =
+                                panel.and_then(|p| p.left_panel.as_ref()).and_then(|s| {
+                                    match serde_json::from_str::<LeftPanelSnapshot>(s) {
+                                        Ok(panel) => Some(panel),
+                                        Err(_) => {
+                                            if matches!(data_scope, PersistedDataScope::LocalApp) {
+                                                local_restoration_was_lossy = true;
+                                            }
+                                            None
+                                        }
+                                    }
+                                });
 
-                            let right_panel = panel
-                                .and_then(|p| p.right_panel.as_ref())
-                                .and_then(|s| serde_json::from_str::<RightPanelSnapshot>(s).ok());
+                            let right_panel =
+                                panel.and_then(|p| p.right_panel.as_ref()).and_then(|s| {
+                                    match serde_json::from_str::<RightPanelSnapshot>(s) {
+                                        Ok(panel) => Some(panel),
+                                        Err(_) => {
+                                            if matches!(data_scope, PersistedDataScope::LocalApp) {
+                                                local_restoration_was_lossy = true;
+                                            }
+                                            None
+                                        }
+                                    }
+                                });
 
                             let group_id = tab
                                 .tab_group_id
                                 .and_then(|row_id| tab_group_id_by_row_id.get(&row_id).copied());
+                            let selected_color = match tab.color.as_deref() {
+                                Some(serialized) => serde_yaml::from_str(serialized)
+                                    .or_else(|_| {
+                                        serde_yaml::from_str::<AnsiColorIdentifier>(serialized)
+                                            .map(SelectedTabColor::Color)
+                                    })
+                                    .unwrap_or_else(|_| {
+                                        if matches!(data_scope, PersistedDataScope::LocalApp) {
+                                            local_restoration_was_lossy = true;
+                                        }
+                                        SelectedTabColor::default()
+                                    }),
+                                None => SelectedTabColor::default(),
+                            };
                             Some(TabSnapshot {
                                 root,
                                 custom_title: tab.custom_title,
                                 default_directory_color: None,
-                                selected_color: tab
-                                    .color
-                                    .as_deref()
-                                    .and_then(|s| {
-                                        serde_yaml::from_str::<SelectedTabColor>(s).ok().or_else(
-                                            || {
-                                                // Fall back to the old format which stored a bare AnsiColorIdentifier
-                                                serde_yaml::from_str::<AnsiColorIdentifier>(s)
-                                                    .ok()
-                                                    .map(SelectedTabColor::Color)
-                                            },
-                                        )
-                                    })
-                                    .unwrap_or_default(),
+                                selected_color,
                                 left_panel,
                                 right_panel,
                                 group_id,
@@ -2704,12 +2820,33 @@ fn read_sqlite_data(
                             .is_some()
                     });
 
+                    let restored_team_uid = window.team_uid.and_then(|persisted_team_uid| {
+                        match ServerId::try_from(persisted_team_uid) {
+                            Ok(parsed_team_uid) => Some(parsed_team_uid),
+                            Err(_) => {
+                                if matches!(data_scope, PersistedDataScope::LocalApp) {
+                                    local_restoration_was_lossy = true;
+                                }
+                                None
+                            }
+                        }
+                    });
+                    let restored_agent_management_filters = window
+                        .agent_management_filters
+                        .and_then(|serialized| match serde_json::from_str(&serialized) {
+                            Ok(filters) => Some(filters),
+                            Err(_) => {
+                                if matches!(data_scope, PersistedDataScope::LocalApp) {
+                                    local_restoration_was_lossy = true;
+                                }
+                                None
+                            }
+                        });
+
                     WindowSnapshot {
                         tabs: saved_tabs,
                         active_tab_index: tab_index,
-                        team_uid: window.team_uid.and_then(|persisted_team_uid| {
-                            ServerId::try_from(persisted_team_uid).ok()
-                        }),
+                        team_uid: restored_team_uid,
                         quake_mode: window.quake_mode,
                         bounds,
                         universal_search_width: window.universal_search_width,
@@ -2721,19 +2858,32 @@ fn read_sqlite_data(
                         fullscreen_state: fullscreen_state_val,
                         left_panel_width,
                         right_panel_width,
-                        agent_management_filters: window
-                            .agent_management_filters
-                            .and_then(|s| serde_json::from_str(&s).ok()),
+                        agent_management_filters: restored_agent_management_filters,
                         tab_groups: tab_groups_snapshots,
                     }
                 },
             )
             .collect();
 
+        if matches!(data_scope, PersistedDataScope::LocalApp)
+            && (local_restoration_was_lossy
+                || saved_windows
+                    .iter()
+                    .any(|window| !window.is_local_terminal_only()))
+        {
+            return Err(Error::DeserializationError(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "local terminal restoration state is invalid",
+            ))));
+        }
+
         let restored_blocks = get_all_restored_blocks(conn)?;
 
-        // Load active MCP servers from database
-        let running_mcp_servers = load_active_mcp_servers(conn)?;
+        let running_mcp_servers = if matches!(data_scope, PersistedDataScope::LocalApp) {
+            Vec::new()
+        } else {
+            load_active_mcp_servers(conn)?
+        };
 
         Some(AppState {
             windows: saved_windows,
