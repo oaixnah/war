@@ -434,9 +434,7 @@ elif [[ $RELEASE_CHANNEL = "oss" ]]; then
     WARP_APP_NAME="War"
     WARP_SCHEME_NAME="war"
     DMG_VOLUME_NAME="War"
-    export WARP_PRODUCT_NAME="War"
-    export WARP_PLIST_NO_FILE_TYPES=1
-    export WARP_PLIST_NO_SENSITIVE_PERMISSIONS=1
+    source "$WORKSPACE_ROOT_DIR/script/macos/war_plist_policy"
     REGISTER_SERVICES=false
     # The OSS channel does not ship Sentry, so drop the cocoa_sentry feature
     # (which would otherwise pull in the Sentry framework dependency).

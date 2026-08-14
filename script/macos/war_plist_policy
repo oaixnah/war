@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# Canonical Info.plist policy shared by every War OSS bundle path.
+export WARP_PRODUCT_NAME="War"
+export WARP_PLIST_NO_FILE_TYPES=1
+export WARP_PLIST_NO_SENSITIVE_PERMISSIONS=1

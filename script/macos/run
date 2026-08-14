@@ -119,8 +119,7 @@ fi
 export WARP_SCHEME_NAME
 export WARP_PLIST_PATH="$WARP_APP_PATH/Contents/Info.plist"
 if [ "$WARP_CHANNEL" = "oss" ]; then
-  export WARP_PRODUCT_NAME="War"
-  export WARP_PLIST_NO_FILE_TYPES=1
+  source "${REPO_ROOT}/script/macos/war_plist_policy"
 fi
 ./script/update_plist
 if [ "$WARP_CHANNEL" = "oss" ]; then

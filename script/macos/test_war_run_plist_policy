@@ -1,0 +1,32 @@
+#!/bin/bash
+
+set -euo pipefail
+
+workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+run_script="$workspace_root/script/macos/run"
+bundle_script="$workspace_root/script/macos/bundle"
+policy_script="$workspace_root/script/macos/war_plist_policy"
+unset WARP_PRODUCT_NAME WARP_PLIST_NO_FILE_TYPES WARP_PLIST_NO_SENSITIVE_PERMISSIONS
+source "$policy_script"
+
+[[ "$WARP_PRODUCT_NAME" == "War" ]]
+[[ "$WARP_PLIST_NO_FILE_TYPES" == "1" ]]
+[[ "$WARP_PLIST_NO_SENSITIVE_PERMISSIONS" == "1" ]]
+
+assert_sources_policy() {
+  local script_path="$1"
+  local source_line
+  local update_line
+
+  source_line="$(grep -nE '^[[:space:]]*source .*script/macos/war_plist_policy' "$script_path" | cut -d: -f1)"
+  update_line="$(grep -nE '^[[:space:]]*(\./script/update_plist|"?\$WORKSPACE_ROOT_DIR/script/update_plist"?)' "$script_path" | cut -d: -f1 | head -1)"
+  if [[ -z "$source_line" || -z "$update_line" || "$source_line" -ge "$update_line" ]]; then
+    echo "War plist policy must be sourced before update_plist in $script_path" >&2
+    exit 1
+  fi
+}
+
+assert_sources_policy "$run_script"
+assert_sources_policy "$bundle_script"
+
+echo "War run plist policy is valid"
