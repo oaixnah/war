@@ -20,6 +20,10 @@ echo "Rust formatting succeeded..."
 echo "Checking for inline Rust test modules..."
 ./script/check_no_inline_test_modules
 echo "Inline Rust test module check succeeded..."
+echo "Checking War macOS verification scripts..."
+bash ./script/macos/test_war_run_plist_policy
+bash ./script/macos/test_verify_local_terminal_startup
+echo "War macOS verification script checks succeeded..."
 
 echo "Running clippy..."
 # Exclude warp_completer because we run clippy on it with default features (rather than all features) below.

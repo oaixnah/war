@@ -1,0 +1,218 @@
+#!/bin/bash
+
+set -euo pipefail
+
+workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+verification_script="$workspace_root/script/macos/verify_local_terminal_startup"
+temp_dir="$(mktemp -d)"
+test_home="$temp_dir/home"
+fake_bin="$temp_dir/bin"
+fake_state="$temp_dir/state"
+evidence_dir="$temp_dir/evidence"
+trap 'rm -rf "$temp_dir"' EXIT
+
+mkdir -p "$test_home" "$fake_bin" "$fake_state"
+printf '%s\n' "war-m2-disposable-account" >"$test_home/.war-m2-disposable-account"
+
+cat >"$fake_bin/defaults" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+command_name="$1"
+domain="$2"
+key="$3"
+state_file="$FAKE_MACOS_STATE/defaults-${domain//\//_}-${key//\//_}"
+case "$command_name" in
+  write)
+    [[ "$4" == "-string" ]]
+    printf '%s\n' "$5" >"$state_file"
+    ;;
+  read)
+    cat "$state_file"
+    ;;
+  delete)
+    if [[ "${FAKE_DEFAULTS_FAIL_DELETE:-0}" == "1" ]]; then
+      exit 1
+    fi
+    rm "$state_file"
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+
+cat >"$fake_bin/security" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+command_name="$1"
+shift
+account=""
+service=""
+value=""
+print_value=false
+while (( "$#" )); do
+  case "$1" in
+    -a) account="$2"; shift 2 ;;
+    -s) service="$2"; shift 2 ;;
+    -w)
+      if (( "$#" > 1 )) && [[ "$2" != -* ]]; then
+        value="$2"
+        shift 2
+      else
+        print_value=true
+        shift
+      fi
+      ;;
+    -U) shift ;;
+    *) shift ;;
+  esac
+done
+state_file="$FAKE_MACOS_STATE/keychain-${account//\//_}-${service//\//_}"
+case "$command_name" in
+  add-generic-password)
+    if [[ "${FAKE_SECURITY_FAIL_ADD:-0}" == "1" ]]; then
+      exit 1
+    fi
+    printf '%s\n' "$value" >"$state_file"
+    ;;
+  find-generic-password)
+    if [[ "$print_value" == true ]]; then
+      cat "$state_file"
+    else
+      [[ -f "$state_file" ]]
+    fi
+    ;;
+  delete-generic-password) rm "$state_file" ;;
+  *) exit 2 ;;
+esac
+EOF
+
+chmod +x "$fake_bin/defaults" "$fake_bin/security"
+
+if WAR_M2_ALLOW_NON_MACOS_FOR_TESTS=1 \
+  "$verification_script" checklist --unknown-option >/dev/null 2>&1; then
+  echo "Verification harness unexpectedly accepted an unknown option." >&2
+  exit 1
+fi
+
+if env \
+  HOME="$test_home" \
+  PATH="$fake_bin:$PATH" \
+  FAKE_MACOS_STATE="$fake_state" \
+  WAR_M2_ALLOW_NON_MACOS_FOR_TESTS=1 \
+  WAR_M2_ALLOW_DIRTY_FOR_TESTS=1 \
+  "$verification_script" sentinel-verify --disposable-account \
+    --evidence-dir "$workspace_root" >/dev/null 2>&1; then
+  echo "Verification harness unexpectedly accepted an unmarked evidence directory." >&2
+  exit 1
+fi
+
+run_verification() {
+  env \
+    HOME="$test_home" \
+    PATH="$fake_bin:$PATH" \
+    FAKE_MACOS_STATE="$fake_state" \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=safe.directory \
+    GIT_CONFIG_VALUE_0="$workspace_root" \
+    WAR_M2_ALLOW_NON_MACOS_FOR_TESTS=1 \
+    WAR_M2_ALLOW_DIRTY_FOR_TESTS=1 \
+    "$verification_script" "$@" --disposable-account --evidence-dir "$evidence_dir"
+}
+
+rm "$test_home/.war-m2-disposable-account"
+if run_verification sentinel-prepare >/dev/null 2>&1; then
+  echo "Sentinel preparation unexpectedly accepted an unmarked account." >&2
+  exit 1
+fi
+printf '%s\n' "war-m2-disposable-account" >"$test_home/.war-m2-disposable-account"
+
+if run_verification sentinel-verify >/dev/null 2>&1; then
+  echo "Sentinel verification unexpectedly passed before preparation." >&2
+  exit 1
+fi
+
+if FAKE_SECURITY_FAIL_ADD=1 run_verification sentinel-prepare >/dev/null 2>&1; then
+  echo "Sentinel preparation unexpectedly passed after a Keychain failure." >&2
+  exit 1
+fi
+[[ ! -e "$evidence_dir/sentinel-token" ]]
+if compgen -G "$test_home/.warp/war-m2-*" >/dev/null \
+  || compgen -G "$test_home/.warp-oss/war-m2-*" >/dev/null \
+  || compgen -G "$test_home/Library/Application Support/dev.warp.WarpOss/war-m2-*" >/dev/null \
+  || compgen -G "$test_home/Library/Group Containers/2BBY89MBSN.dev.warp/war-m2-*" >/dev/null \
+  || compgen -G "$fake_state/*" >/dev/null; then
+  echo "Sentinel preparation did not roll back after a Keychain failure." >&2
+  exit 1
+fi
+
+run_verification sentinel-prepare
+token="$(<"$evidence_dir/sentinel-token")"
+sentinel_path="$test_home/.warp/$token"
+[[ "$(<"$sentinel_path")" == "$token" ]]
+for expected_path in \
+  "$test_home/.warp/$token" \
+  "$test_home/.warp-oss/$token" \
+  "$test_home/Library/Application Support/dev.warp.WarpOss/$token" \
+  "$test_home/Library/Group Containers/2BBY89MBSN.dev.warp/$token"; do
+  [[ "$(<"$expected_path")" == "$token" ]]
+done
+
+run_verification sentinel-verify
+printf '%s\n' '../unsafe-token' >"$evidence_dir/sentinel-token"
+if run_verification sentinel-cleanup >/dev/null 2>&1; then
+  echo "Sentinel cleanup unexpectedly accepted an invalid token." >&2
+  exit 1
+fi
+printf '%s\n' "$token" >"$evidence_dir/sentinel-token"
+printf 'tampered\n' >"$sentinel_path"
+if run_verification sentinel-verify >/dev/null 2>&1; then
+  echo "Sentinel verification did not detect tampering." >&2
+  exit 1
+fi
+printf '%s\n' "$token" >"$sentinel_path"
+
+printf 'pending:%s\n' "$token" >"$evidence_dir/sentinel-cleanup-$token-file-0"
+if FAKE_DEFAULTS_FAIL_DELETE=1 run_verification sentinel-cleanup >/dev/null 2>&1; then
+  echo "Sentinel cleanup unexpectedly passed after a defaults deletion failure." >&2
+  exit 1
+fi
+[[ -e "$evidence_dir/sentinel-token" ]]
+printf '%s\n' "$token" >"$sentinel_path"
+if run_verification sentinel-cleanup >/dev/null 2>&1; then
+  echo "Sentinel cleanup unexpectedly accepted a recreated completed file." >&2
+  exit 1
+fi
+rm "$sentinel_path"
+keychain_state="$fake_state/keychain-WarAcceptance-$token-dev.warp.WarpOss"
+printf '%s\n' "$token" >"$keychain_state"
+if run_verification sentinel-cleanup >/dev/null 2>&1; then
+  echo "Sentinel cleanup unexpectedly accepted a recreated completed Keychain item." >&2
+  exit 1
+fi
+rm "$keychain_state"
+run_verification sentinel-cleanup
+[[ ! -e "$evidence_dir/sentinel-token" ]]
+for removed_path in \
+  "$test_home/.warp/$token" \
+  "$test_home/.warp-oss/$token" \
+  "$test_home/Library/Application Support/dev.warp.WarpOss/$token" \
+  "$test_home/Library/Group Containers/2BBY89MBSN.dev.warp/$token"; do
+  [[ ! -e "$removed_path" ]]
+done
+if compgen -G "$fake_state/*" >/dev/null; then
+  echo "Fake macOS state remained after sentinel cleanup." >&2
+  exit 1
+fi
+
+run_verification sentinel-prepare
+token="$(<"$evidence_dir/sentinel-token")"
+rm "$fake_state"/defaults-* "$fake_state"/keychain-*
+printf 'pending:%s\n' "$token" >"$evidence_dir/sentinel-cleanup-$token-defaults"
+printf 'pending:%s\n' "$token" >"$evidence_dir/sentinel-cleanup-$token-keychain"
+run_verification sentinel-cleanup
+[[ ! -e "$evidence_dir/sentinel-token" ]]
+if compgen -G "$fake_state/*" >/dev/null; then
+  echo "Interrupted defaults or Keychain cleanup did not recover." >&2
+  exit 1
+fi
+
+echo "War local terminal startup verification harness is valid"

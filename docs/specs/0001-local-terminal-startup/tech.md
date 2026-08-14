@@ -185,6 +185,28 @@ cargo test --doc
 WARP_SKIP_COMMON_SKILLS_INSTALL=1 ./script/run --dont-open
 ```
 
+On the macOS acceptance host, the repository harness records the reproducible checks and writes its
+evidence under `target/m2-macos-verification/<commit>/`:
+
+```bash
+./script/macos/verify_local_terminal_startup all --expected-commit "$(git rev-parse HEAD)"
+printf '%s\n' war-m2-disposable-account > ~/.war-m2-disposable-account
+./script/macos/verify_local_terminal_startup sentinel-prepare --disposable-account --expected-commit "$(git rev-parse HEAD)"
+./script/macos/verify_local_terminal_startup network-audit --expected-commit "$(git rev-parse HEAD)"
+./script/macos/verify_local_terminal_startup sentinel-verify --disposable-account --expected-commit "$(git rev-parse HEAD)"
+./script/macos/verify_local_terminal_startup sentinel-cleanup --disposable-account --expected-commit "$(git rev-parse HEAD)"
+rm ~/.war-m2-disposable-account
+```
+
+The harness intentionally does not disable network services, mark captured traffic as safe, inspect
+visual behavior, or mutate a user's existing Warp records. Offline launch, process attribution, log
+review, restoration, alternate-screen behavior, and visible identity remain explicit items in the
+generated timestamped manual checklist. Sentinel commands are restricted to a disposable account carrying
+the explicit marker shown above and create uniquely named records which the cleanup command removes only
+after verifying them. The build records the commit, canonical bundle path, and executable hash; the network
+audit refuses to inspect a different or stale bundle. Process ancestry evidence retains only numeric user,
+process, and parent-process identifiers; it never persists system-wide command arguments.
+
 On Windows, use the documented exclusions and treat compilation, Clippy, and unit tests as preliminary
 evidence only. Required macOS verification builds and signs `War.app`, tests zsh and bash, validates
 session restoration and alternate-screen behavior, launches with networking disabled, and captures an

@@ -1,0 +1,998 @@
+#!/bin/bash
+
+set -euo pipefail
+umask 077
+
+workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$workspace_root"
+
+usage() {
+  cat <<'EOF'
+Usage: script/macos/verify_local_terminal_startup <command> [options]
+
+Commands:
+  preflight                 Record host/tool versions and require a clean checkout.
+  quality-gates             Run the repository format and presubmit gates.
+  build                     Build, self-sign, and inspect War.app.
+  integration               Run local War integration coverage with zsh and bash.
+  checklist                 Write the remaining manual acceptance checklist.
+  sentinel-prepare          Create inherited Warp sentinels in a disposable account.
+  sentinel-verify           Verify that inherited Warp sentinels are unchanged.
+  sentinel-cleanup          Remove only sentinels created by this script.
+  network-audit             Capture process-attributed startup network evidence.
+  all                       Run all non-destructive automated checks and the checklist.
+
+Options:
+  --app <path>              War.app path for checklist or network audit.
+  --disposable-account      Required for sentinel commands.
+  --duration <seconds>      Network capture duration (default: 30).
+  --evidence-dir <path>     Evidence output directory.
+  --expected-commit <sha>   Require HEAD to equal this commit.
+
+The script never disables network interfaces. Perform the offline launch from the
+generated manual checklist so a remote macOS runner cannot disconnect itself.
+Sentinel commands also require $HOME/.war-m2-disposable-account containing
+exactly "war-m2-disposable-account".
+EOF
+}
+
+command_name="${1:-}"
+if [[ -z "$command_name" || "$command_name" == "-h" || "$command_name" == "--help" ]]; then
+  usage
+  exit 0
+fi
+shift
+
+app_path="${WAR_M2_APP_PATH:-}"
+app_path_supplied=false
+if [[ -n "$app_path" ]]; then
+  app_path_supplied=true
+fi
+audit_duration="${WAR_M2_AUDIT_SECONDS:-30}"
+disposable_account=false
+expected_commit="${WAR_M2_EXPECTED_COMMIT:-}"
+evidence_dir="${WAR_M2_EVIDENCE_DIR:-}"
+
+while (( "$#" )); do
+  case "$1" in
+    --app)
+      app_path="${2:?--app requires a path}"
+      app_path_supplied=true
+      shift 2
+      ;;
+    --disposable-account)
+      disposable_account=true
+      shift
+      ;;
+    --duration)
+      audit_duration="${2:?--duration requires seconds}"
+      shift 2
+      ;;
+    --evidence-dir)
+      evidence_dir="${2:?--evidence-dir requires a path}"
+      shift 2
+      ;;
+    --expected-commit)
+      expected_commit="${2:?--expected-commit requires a SHA}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "${WAR_M2_ALLOW_NON_MACOS_FOR_TESTS:-0}" != "1" && "$(uname -s)" != "Darwin" ]]; then
+  echo "M2 runtime acceptance must run on macOS." >&2
+  exit 1
+fi
+
+for required_command in git; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    echo "Missing required command: $required_command" >&2
+    exit 1
+  fi
+done
+
+head_commit="$(git rev-parse HEAD)"
+if [[ -n "$expected_commit" && "$head_commit" != "$expected_commit" ]]; then
+  echo "Expected commit $expected_commit, got $head_commit" >&2
+  exit 1
+fi
+
+if [[ -z "$evidence_dir" ]]; then
+  evidence_dir="$workspace_root/target/m2-macos-verification/${head_commit:0:12}"
+elif [[ "$evidence_dir" != /* ]]; then
+  evidence_dir="$workspace_root/$evidence_dir"
+fi
+evidence_marker="$evidence_dir/.war-m2-evidence"
+if [[ -L "$evidence_dir" || ( -e "$evidence_dir" && ! -d "$evidence_dir" ) ]]; then
+  echo "Evidence directory must not be a symbolic link: $evidence_dir" >&2
+  exit 1
+fi
+if [[ -d "$evidence_dir" && ( -L "$evidence_marker" || ! -f "$evidence_marker" ) ]]; then
+  echo "Refusing to reuse an unmarked evidence directory: $evidence_dir" >&2
+  exit 1
+fi
+mkdir -p "$evidence_dir"
+chmod 700 "$evidence_dir"
+if [[ ! -f "$evidence_marker" ]]; then
+  printf '%s\n' "war-m2-evidence-v1" >"$evidence_marker"
+elif [[ "$(<"$evidence_marker")" != "war-m2-evidence-v1" ]]; then
+  echo "Invalid evidence directory marker: $evidence_marker" >&2
+  exit 1
+fi
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+
+if [[ -n "$app_path" && "$app_path" != /* ]]; then
+  app_path="$workspace_root/$app_path"
+fi
+
+resolve_app_path() {
+  if [[ -n "$app_path" ]]; then
+    return
+  fi
+  for required_command in cargo jq; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+      echo "Missing required command: $required_command" >&2
+      exit 1
+    fi
+  done
+  local target_dir
+  target_dir="$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)"
+  app_path="$target_dir/debug/bundle/osx/War.app"
+}
+
+manifest_commit_file="$evidence_dir/acceptance-commit"
+manifest_app_file="$evidence_dir/acceptance-app-path"
+manifest_sha_file="$evidence_dir/acceptance-war-sha256"
+manifest_cdhash_file="$evidence_dir/acceptance-bundle-cdhash"
+
+canonical_app_path() {
+  local path="$1"
+  local parent
+  parent="$(cd "$(dirname "$path")" && pwd -P)"
+  printf '%s/%s\n' "$parent" "$(basename "$path")"
+}
+
+write_acceptance_manifest() {
+  local manifest_file
+  for manifest_file in \
+    "$manifest_commit_file" "$manifest_app_file" "$manifest_sha_file" "$manifest_cdhash_file"; do
+    if [[ -L "$manifest_file" ]]; then
+      echo "Refusing to overwrite symbolic-link manifest file: $manifest_file" >&2
+      return 1
+    fi
+  done
+  local canonical_path
+  local bundle_cdhash
+  local executable_sha
+  canonical_path="$(canonical_app_path "$app_path")"
+  bundle_cdhash="$(codesign -dv --verbose=4 "$app_path" 2>&1 | grep '^CDHash=' | cut -d= -f2)"
+  executable_sha="$(shasum -a 256 "$app_path/Contents/MacOS/war" | cut -d' ' -f1)"
+  if [[ -z "$bundle_cdhash" ]]; then
+    echo "Unable to read bundle code-directory hash." >&2
+    return 1
+  fi
+  printf '%s\n' "$head_commit" >"$manifest_commit_file"
+  printf '%s\n' "$canonical_path" >"$manifest_app_file"
+  printf '%s\n' "$executable_sha" >"$manifest_sha_file"
+  printf '%s\n' "$bundle_cdhash" >"$manifest_cdhash_file"
+}
+
+validate_acceptance_manifest() {
+  local manifest_file
+  for manifest_file in \
+    "$manifest_commit_file" "$manifest_app_file" "$manifest_sha_file" "$manifest_cdhash_file"; do
+    if [[ -L "$manifest_file" || ! -f "$manifest_file" ]]; then
+      echo "Missing valid acceptance manifest file: $manifest_file" >&2
+      return 1
+    fi
+  done
+  local canonical_path
+  local bundle_cdhash
+  local executable_sha
+  canonical_path="$(canonical_app_path "$app_path")"
+  codesign --verify --deep --strict --verbose=2 "$app_path"
+  bundle_cdhash="$(codesign -dv --verbose=4 "$app_path" 2>&1 | grep '^CDHash=' | cut -d= -f2)"
+  executable_sha="$(shasum -a 256 "$app_path/Contents/MacOS/war" | cut -d' ' -f1)"
+  if [[ "$(<"$manifest_commit_file")" != "$head_commit" \
+    || "$(<"$manifest_app_file")" != "$canonical_path" \
+    || "$(<"$manifest_sha_file")" != "$executable_sha" \
+    || "$(<"$manifest_cdhash_file")" != "$bundle_cdhash" ]]; then
+    echo "Acceptance bundle does not match the recorded commit, path, and executable hash." >&2
+    return 1
+  fi
+}
+
+run_logged() {
+  local log_name="$1"
+  shift
+
+  "$@" 2>&1 | tee "$evidence_dir/${run_id}-${log_name}.log"
+}
+
+require_clean_checkout() {
+  if [[ "${WAR_M2_ALLOW_DIRTY_FOR_TESTS:-0}" == "1" ]]; then
+    return
+  fi
+  if [[ -n "$(git status --short)" ]]; then
+    echo "Acceptance requires a clean checkout." >&2
+    git status --short >&2
+    exit 1
+  fi
+}
+
+preflight() {
+  require_clean_checkout
+  {
+    echo "commit=$head_commit"
+    echo "branch=$(git branch --show-current)"
+    echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    sw_vers
+    uname -a
+    rustc --version
+    cargo --version
+    xcodebuild -version
+  } | tee "$evidence_dir/${run_id}-preflight.log"
+}
+
+quality_gates() {
+  require_clean_checkout
+  run_logged format ./script/format --check
+  run_logged presubmit ./script/presubmit
+}
+
+build_bundle() {
+  require_clean_checkout
+  if [[ "$app_path_supplied" == true ]]; then
+    echo "build always verifies the bundle produced by this checkout; omit --app." >&2
+    exit 2
+  fi
+  resolve_app_path
+  run_logged build env WARP_SKIP_COMMON_SKILLS_INSTALL=1 ./script/run --dont-open
+  if [[ ! -d "$app_path" ]]; then
+    echo "War bundle was not produced at $app_path" >&2
+    exit 1
+  fi
+
+  run_logged bundle-identity bash ./script/macos/test_war_bundle_identity "$app_path"
+  run_logged codesign-verify codesign --verify --deep --strict --verbose=2 "$app_path"
+  codesign -dv --verbose=4 "$app_path" >"$evidence_dir/${run_id}-codesign-details.log" 2>&1
+  codesign -d --entitlements :- "$app_path" \
+    >"$evidence_dir/${run_id}-codesign-entitlements.plist" \
+    2>"$evidence_dir/${run_id}-codesign-entitlements.log"
+  plutil -lint "$evidence_dir/${run_id}-codesign-entitlements.plist"
+  shasum -a 256 "$app_path/Contents/MacOS/war" | tee "$evidence_dir/${run_id}-war-executable.sha256"
+  write_acceptance_manifest
+}
+
+run_integration_test() {
+  local shell_path="$1"
+  local test_name="$2"
+  local shell_name
+
+  shell_name="$(basename "$shell_path")"
+  run_logged "integration-${shell_name}-${test_name}" \
+    env WARP_SHELL_PATH="$shell_path" WAR_LOCAL_APP_INTEGRATION=1 \
+    cargo run -p integration --bin integration -- "$test_name"
+}
+
+integration() {
+  require_clean_checkout
+  for shell_path in /bin/zsh /bin/bash; do
+    if [[ ! -x "$shell_path" ]]; then
+      echo "Missing required shell: $shell_path" >&2
+      exit 1
+    fi
+    run_integration_test "$shell_path" test_local_offline_startup
+  done
+
+  for test_name in \
+    test_add_many_sessions \
+    test_ctrl_tab_session_switching \
+    test_session_restoration \
+    test_waterfall_input_alt_grid \
+    test_alt_screen_context_menu_with_sgr_with_mouse_reporting; do
+    run_integration_test /bin/zsh "$test_name"
+  done
+}
+
+write_checklist() {
+  require_clean_checkout
+  resolve_app_path
+  cat >"$evidence_dir/${run_id}-manual-checklist.md" <<EOF
+# M2 Local Terminal macOS Acceptance
+
+- Commit: \`$head_commit\`
+- Bundle: \`$app_path\`
+
+## Offline Launch
+
+- [ ] Record \`networksetup -listallnetworkservices\` and current interface state.
+- [ ] Disable active physical network services without disconnecting a remote test runner.
+- [ ] Launch \`open -na "$app_path"\`.
+- [ ] Confirm one usable local shell opens with no login, onboarding, billing, Drive, or agent UI.
+- [ ] Confirm command blocks, history, search, copy, command re-entry, tabs, and splits work.
+- [ ] Restore every network service changed for this check.
+
+## Restoration And Terminal Behavior
+
+- [ ] Restore multiple local tabs and split panes with distinct working directories.
+- [ ] Confirm missing or corrupt War persistence opens one fresh shell without replacing corrupt bytes.
+- [ ] Run \`vim\`, \`less\`, or \`top\`; verify input, resize, scrolling, tab switching, and clean exit.
+- [ ] Inspect icon, menus, About, and bundle surfaces for War identity and retained license attribution.
+
+## Privacy
+
+- [ ] Run \`sentinel-prepare --disposable-account\` before launching War.
+- [ ] Run \`sentinel-verify --disposable-account\` after online and offline launches.
+- [ ] Run \`network-audit --app "$app_path"\` and inspect every captured War PID/socket event.
+- [ ] Confirm no listener exists on inherited port 9282.
+- [ ] Review \`~/Library/Logs/war.log\` for commands, output, prompts, environment values, credentials, telemetry, or upload queues.
+- [ ] Run \`sentinel-cleanup --disposable-account\` after evidence is retained.
+
+Record screenshots, failures, deviations, and the exact network services changed alongside this file.
+EOF
+  echo "Wrote $evidence_dir/${run_id}-manual-checklist.md"
+}
+
+require_disposable_account() {
+  if [[ "$disposable_account" != true ]]; then
+    echo "Sentinel commands require --disposable-account." >&2
+    exit 2
+  fi
+  for required_command in defaults security; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+      echo "Missing required command: $required_command" >&2
+      exit 1
+    fi
+  done
+  local marker="$HOME/.war-m2-disposable-account"
+  if [[ -L "$marker" || ! -f "$marker" || "$(<"$marker")" != "war-m2-disposable-account" ]]; then
+    echo "Sentinel commands require a dedicated account marker at $marker." >&2
+    exit 1
+  fi
+}
+
+sentinel_token_file="$evidence_dir/sentinel-token"
+sentinel_commit_file="$evidence_dir/sentinel-commit"
+sentinel_audit_file="$evidence_dir/sentinel-audit.log"
+warp_defaults_domain="dev.warp.WarpOss"
+warp_keychain_service="dev.warp.WarpOss"
+sentinel_prepare_active=false
+sentinel_prepare_token=""
+sentinel_prepare_defaults_key=""
+sentinel_prepare_keychain_account=""
+sentinel_prepare_defaults=false
+sentinel_prepare_keychain=false
+
+validate_sentinel_token() {
+  local token="$1"
+  if [[ ! "$token" =~ ^war-m2-[0-9a-f]{12}-[0-9]{14}-[0-9]+$ ]]; then
+    echo "Invalid sentinel token." >&2
+    return 1
+  fi
+}
+
+read_sentinel_token() {
+  if [[ -L "$sentinel_token_file" || ! -f "$sentinel_token_file" ]]; then
+    echo "No valid sentinel state found at $sentinel_token_file" >&2
+    return 1
+  fi
+  local token
+  token="$(<"$sentinel_token_file")"
+  validate_sentinel_token "$token"
+  printf '%s\n' "$token"
+}
+
+record_sentinel_action() {
+  local action="$1"
+  local token="$2"
+  if [[ -L "$sentinel_audit_file" ]]; then
+    echo "Refusing to write symbolic-link sentinel audit: $sentinel_audit_file" >&2
+    return 1
+  fi
+  printf '%s commit=%s action=%s token=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$head_commit" "$action" "$token" \
+    >>"$sentinel_audit_file"
+}
+
+validate_sentinel_roots() {
+  local root
+  for root in \
+    "$HOME/.warp" \
+    "$HOME/.warp-oss" \
+    "$HOME/Library/Application Support/dev.warp.WarpOss" \
+    "$HOME/Library/Group Containers/2BBY89MBSN.dev.warp"; do
+    if [[ -L "$root" ]]; then
+      echo "Refusing to use symbolic-link sentinel root: $root" >&2
+      return 1
+    fi
+  done
+}
+
+sentinel_paths() {
+  local token="$1"
+  validate_sentinel_token "$token"
+  printf '%s\n' \
+    "$HOME/.warp/$token" \
+    "$HOME/.warp-oss/$token" \
+    "$HOME/Library/Application Support/dev.warp.WarpOss/$token" \
+    "$HOME/Library/Group Containers/2BBY89MBSN.dev.warp/$token"
+}
+
+sentinel_prepare() {
+  require_disposable_account
+  require_clean_checkout
+  validate_sentinel_roots
+  if [[ -e "$sentinel_token_file" || -L "$sentinel_token_file" \
+    || -e "$sentinel_commit_file" || -L "$sentinel_commit_file" ]]; then
+    echo "Sentinels already prepared; clean them up before preparing another set." >&2
+    exit 1
+  fi
+
+  local token="war-m2-${head_commit:0:12}-$(date -u +%Y%m%d%H%M%S)-$$"
+  local defaults_key="WarAcceptance_${token//-/_}"
+  local keychain_account="WarAcceptance-$token"
+  local path
+
+  while IFS= read -r path; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      echo "Refusing to overwrite sentinel path: $path" >&2
+      exit 1
+    fi
+  done < <(sentinel_paths "$token")
+  if defaults read "$warp_defaults_domain" "$defaults_key" >/dev/null 2>&1; then
+    echo "Refusing to overwrite an existing Warp defaults sentinel." >&2
+    exit 1
+  fi
+  if security find-generic-password \
+    -a "$keychain_account" -s "$warp_keychain_service" >/dev/null 2>&1; then
+    echo "Refusing to overwrite an existing Warp Keychain sentinel." >&2
+    exit 1
+  fi
+
+  sentinel_prepare_active=true
+  sentinel_prepare_token="$token"
+  sentinel_prepare_defaults_key="$defaults_key"
+  sentinel_prepare_keychain_account="$keychain_account"
+  sentinel_prepare_defaults=false
+  sentinel_prepare_keychain=false
+  trap rollback_sentinel_prepare EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  while IFS= read -r path; do
+    mkdir -p "$(dirname "$path")"
+    printf '%s\n' "$token" >"$path"
+  done < <(sentinel_paths "$token")
+
+  sentinel_prepare_defaults=true
+  defaults write "$warp_defaults_domain" "$defaults_key" -string "$token"
+  sentinel_prepare_keychain=true
+  security add-generic-password -a "$keychain_account" -s "$warp_keychain_service" -w "$token" >/dev/null
+  printf '%s\n' "$token" >"$sentinel_token_file"
+  printf '%s\n' "$head_commit" >"$sentinel_commit_file"
+  sentinel_verify
+  sentinel_prepare_active=false
+  trap - EXIT INT TERM
+  record_sentinel_action prepared "$token"
+  echo "Prepared inherited Warp sentinels for token $token"
+}
+
+rollback_sentinel_prepare() {
+  if [[ "$sentinel_prepare_active" != true ]]; then
+    return
+  fi
+
+  local path
+  while IFS= read -r path; do
+    if [[ -f "$path" && "$(<"$path")" == "$sentinel_prepare_token" ]]; then
+      rm -f "$path"
+    fi
+  done < <(sentinel_paths "$sentinel_prepare_token")
+  if [[ "$sentinel_prepare_defaults" == true ]]; then
+    defaults delete "$warp_defaults_domain" "$sentinel_prepare_defaults_key" >/dev/null 2>&1 || true
+  fi
+  if [[ "$sentinel_prepare_keychain" == true ]]; then
+    security delete-generic-password \
+      -a "$sentinel_prepare_keychain_account" \
+      -s "$warp_keychain_service" >/dev/null 2>&1 || true
+  fi
+  rm -f "$sentinel_token_file"
+  rm -f "$sentinel_commit_file"
+}
+
+sentinel_verify() {
+  require_disposable_account
+  validate_sentinel_roots
+  if [[ -L "$sentinel_commit_file" || ! -f "$sentinel_commit_file" ]]; then
+    echo "No valid sentinel commit state found at $sentinel_commit_file" >&2
+    exit 1
+  fi
+
+  local token
+  local defaults_key
+  local keychain_account
+  local path
+  token="$(read_sentinel_token)"
+  if [[ "$(<"$sentinel_commit_file")" != "$head_commit" ]]; then
+    echo "Sentinel state belongs to a different commit." >&2
+    exit 1
+  fi
+  defaults_key="WarAcceptance_${token//-/_}"
+  keychain_account="WarAcceptance-$token"
+
+  while IFS= read -r path; do
+    if [[ -L "$path" || ! -f "$path" || "$(<"$path")" != "$token" ]]; then
+      echo "Inherited Warp sentinel changed: $path" >&2
+      exit 1
+    fi
+  done < <(sentinel_paths "$token")
+
+  if [[ "$(defaults read "$warp_defaults_domain" "$defaults_key")" != "$token" ]]; then
+    echo "Inherited Warp defaults sentinel changed." >&2
+    exit 1
+  fi
+  if [[ "$(security find-generic-password -a "$keychain_account" -s "$warp_keychain_service" -w)" != "$token" ]]; then
+    echo "Inherited Warp Keychain sentinel changed." >&2
+    exit 1
+  fi
+  record_sentinel_action verified "$token"
+  echo "Inherited Warp sentinels are unchanged: $token" | tee "$evidence_dir/${run_id}-sentinel-verify.log"
+}
+
+sentinel_cleanup() {
+  require_disposable_account
+  validate_sentinel_roots
+  local token
+  local defaults_key
+  local keychain_account
+  local path
+  local cleanup_failed=false
+  local cleanup_index=0
+  local cleanup_marker
+  local cleanup_state
+  local cleanup_prefix
+  token="$(read_sentinel_token)"
+  defaults_key="WarAcceptance_${token//-/_}"
+  keychain_account="WarAcceptance-$token"
+  cleanup_prefix="$evidence_dir/sentinel-cleanup-$token"
+
+  while IFS= read -r path; do
+    cleanup_marker="$cleanup_prefix-file-$cleanup_index"
+    cleanup_index=$((cleanup_index + 1))
+    cleanup_state=""
+    if [[ -f "$cleanup_marker" ]]; then
+      cleanup_state="$(<"$cleanup_marker")"
+    fi
+    if [[ "$cleanup_state" == "done:$token" ]]; then
+      if [[ -e "$path" || -L "$path" ]]; then
+        echo "A completed file sentinel was recreated: $path" >&2
+        cleanup_failed=true
+      fi
+      continue
+    fi
+    if [[ "$cleanup_state" == "pending:$token" && ! -e "$path" ]]; then
+      printf 'done:%s\n' "$token" >"$cleanup_marker"
+      continue
+    fi
+    if [[ -L "$path" || ! -f "$path" || "$(<"$path")" != "$token" ]]; then
+      echo "Refusing to remove changed sentinel: $path" >&2
+      cleanup_failed=true
+      continue
+    fi
+    if ! printf 'pending:%s\n' "$token" >"$cleanup_marker"; then
+      cleanup_failed=true
+      continue
+    fi
+    if rm "$path"; then
+      printf 'done:%s\n' "$token" >"$cleanup_marker" || cleanup_failed=true
+    else
+      cleanup_failed=true
+    fi
+  done < <(sentinel_paths "$token")
+
+  local defaults_value=""
+  local defaults_ready=true
+  cleanup_marker="$cleanup_prefix-defaults"
+  cleanup_state=""
+  if [[ -f "$cleanup_marker" ]]; then
+    cleanup_state="$(<"$cleanup_marker")"
+  fi
+  if [[ "$cleanup_state" != "done:$token" ]]; then
+    if ! defaults_value="$(defaults read "$warp_defaults_domain" "$defaults_key" 2>/dev/null)"; then
+      if [[ "$cleanup_state" == "pending:$token" ]] \
+        && defaults write "$warp_defaults_domain" "$defaults_key" -string "$token"; then
+        defaults_value="$token"
+      else
+        echo "Unable to read or restore defaults sentinel during cleanup." >&2
+        cleanup_failed=true
+        defaults_ready=false
+      fi
+    fi
+    if [[ "$defaults_ready" != true ]]; then
+      :
+    elif [[ "$defaults_value" != "$token" ]]; then
+      echo "Refusing to remove changed defaults sentinel." >&2
+      cleanup_failed=true
+    elif ! printf 'pending:%s\n' "$token" >"$cleanup_marker"; then
+      cleanup_failed=true
+    elif defaults delete "$warp_defaults_domain" "$defaults_key"; then
+      printf 'done:%s\n' "$token" >"$cleanup_marker" || cleanup_failed=true
+    else
+      cleanup_failed=true
+    fi
+  elif defaults read "$warp_defaults_domain" "$defaults_key" >/dev/null 2>&1; then
+    echo "A completed defaults sentinel was recreated." >&2
+    cleanup_failed=true
+  fi
+
+  local keychain_value=""
+  local keychain_ready=true
+  cleanup_marker="$cleanup_prefix-keychain"
+  cleanup_state=""
+  if [[ -f "$cleanup_marker" ]]; then
+    cleanup_state="$(<"$cleanup_marker")"
+  fi
+  if [[ "$cleanup_state" != "done:$token" ]]; then
+    if ! keychain_value="$(security find-generic-password -a "$keychain_account" -s "$warp_keychain_service" -w 2>/dev/null)"; then
+      if [[ "$cleanup_state" == "pending:$token" ]] \
+        && security add-generic-password -U -a "$keychain_account" -s "$warp_keychain_service" -w "$token" >/dev/null; then
+        keychain_value="$token"
+      else
+        echo "Unable to read or restore Keychain sentinel during cleanup." >&2
+        cleanup_failed=true
+        keychain_ready=false
+      fi
+    fi
+    if [[ "$keychain_ready" != true ]]; then
+      :
+    elif [[ "$keychain_value" != "$token" ]]; then
+      echo "Refusing to remove changed Keychain sentinel." >&2
+      cleanup_failed=true
+    elif ! printf 'pending:%s\n' "$token" >"$cleanup_marker"; then
+      cleanup_failed=true
+    elif security delete-generic-password -a "$keychain_account" -s "$warp_keychain_service" >/dev/null; then
+      printf 'done:%s\n' "$token" >"$cleanup_marker" || cleanup_failed=true
+    else
+      cleanup_failed=true
+    fi
+  elif security find-generic-password \
+    -a "$keychain_account" -s "$warp_keychain_service" >/dev/null 2>&1; then
+    echo "A completed Keychain sentinel was recreated." >&2
+    cleanup_failed=true
+  fi
+
+  if [[ "$cleanup_failed" == true ]]; then
+    echo "Sentinel cleanup was incomplete; state remains at $sentinel_token_file" >&2
+    exit 1
+  fi
+  record_sentinel_action cleaned "$token"
+  rm "$sentinel_token_file" "$sentinel_commit_file"
+  rm -f "$cleanup_prefix"-*
+  echo "Removed sentinels created for $token"
+}
+
+network_audit() {
+  require_clean_checkout
+  resolve_app_path
+  for required_command in awk execsnoop fs_usage lsof mkfifo nettop open osascript pgrep ps shasum sudo; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+      echo "Missing required command: $required_command" >&2
+      exit 1
+    fi
+  done
+  if [[ ! "$audit_duration" =~ ^[0-9]+$ ]]; then
+    echo "Network audit duration must be an integer." >&2
+    exit 2
+  fi
+  audit_duration=$((10#$audit_duration))
+  if (( audit_duration < 10 || audit_duration > 600 )); then
+    echo "Network audit duration must be between 10 and 600 seconds." >&2
+    exit 2
+  fi
+  if [[ ! -d "$app_path" ]]; then
+    echo "Missing War bundle: $app_path" >&2
+    exit 1
+  fi
+  local app_executable="$app_path/Contents/MacOS/war"
+  if [[ ! -x "$app_executable" ]]; then
+    echo "Missing War executable: $app_executable" >&2
+    exit 1
+  fi
+  run_logged network-bundle-identity bash ./script/macos/test_war_bundle_identity "$app_path"
+  validate_acceptance_manifest
+
+  local collector_duration=$((audit_duration + 7))
+  local fs_usage_pid=""
+  local execsnoop_pid=""
+  local execsnoop_sanitizer_pid=""
+  local nettop_pid=""
+  local war_pid=""
+  local sampling_pid=""
+  local war_process_started_at=""
+  local audited_war_pid=""
+  local audit_stop_file="$evidence_dir/${run_id}-network-stop"
+  local owned_pids_file="$evidence_dir/${run_id}-network-owned-pids"
+  local unowned_war_file="$evidence_dir/${run_id}-network-unowned-war-pids"
+  local execsnoop_fifo="$evidence_dir/${run_id}-network-execsnoop.fifo"
+  local execsnoop_error_file="$evidence_dir/${run_id}-network-execsnoop-errors.log"
+  local execsnoop_output_file="$evidence_dir/${run_id}-network-execsnoop.log"
+
+  process_tree_pids() {
+    local discovered="$1"
+    local frontier="$1"
+    local next_frontier
+    local parent_pid
+    local child_pid
+
+    while [[ -n "$frontier" ]]; do
+      next_frontier=""
+      for parent_pid in $frontier; do
+        for child_pid in $(pgrep -P "$parent_pid" || true); do
+          case " $discovered " in
+            *" $child_pid "*) ;;
+            *)
+              discovered="$discovered $child_pid"
+              next_frontier="$next_frontier $child_pid"
+              ;;
+          esac
+        done
+      done
+      frontier="$next_frontier"
+    done
+    printf '%s\n' "$discovered"
+  }
+
+  sample_process_network() {
+    local sample_index=0
+    local process_ids="$war_pid"
+    local live_process_ids
+    local lsof_process_ids
+    local process_id
+    local observed_war_pid
+    while [[ ! -e "$audit_stop_file" ]]; do
+      process_ids="$(process_tree_pids "$process_ids")"
+      live_process_ids=""
+      for process_id in $process_ids; do
+        if kill -0 "$process_id" >/dev/null 2>&1; then
+          live_process_ids="${live_process_ids:+$live_process_ids }$process_id"
+        fi
+      done
+      process_ids="$live_process_ids"
+      printf '%s\n' "$process_ids" >"$owned_pids_file"
+      for observed_war_pid in $(pgrep -x war || true); do
+        case " $process_ids " in
+          *" $observed_war_pid "*) ;;
+          *) printf '%s\n' "$observed_war_pid" >>"$unowned_war_file" ;;
+        esac
+      done
+      lsof_process_ids="$(printf '%s' "$process_ids" | tr ' ' ',')"
+      {
+        echo "sample=$sample_index timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "process_ids=$process_ids"
+        if [[ -n "$lsof_process_ids" ]]; then
+          ps -p "$lsof_process_ids" -o pid=,ppid=,comm= || true
+        fi
+        echo "--- War process-tree sockets ---"
+        if [[ -n "$lsof_process_ids" ]]; then
+          lsof -nP -a -p "$lsof_process_ids" -i || true
+        fi
+        echo "--- War process-tree Unix sockets ---"
+        if [[ -n "$lsof_process_ids" ]]; then
+          lsof -nP -a -p "$lsof_process_ids" -U || true
+        fi
+        echo "--- Port 9282 listeners ---"
+        lsof -nP -iTCP:9282 -sTCP:LISTEN || true
+      } >>"$evidence_dir/${run_id}-network-samples.log" 2>&1
+      sample_index=$((sample_index + 1))
+      sleep 0.25
+    done
+  }
+
+  cleanup_audit() {
+    if [[ -n "$sampling_pid" ]]; then
+      kill "$sampling_pid" >/dev/null 2>&1 || true
+      wait "$sampling_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$war_pid" ]]; then
+      local current_started_at=""
+      current_started_at="$(ps -p "$war_pid" -o lstart= 2>/dev/null || true)"
+      if [[ -n "$war_process_started_at" && "$current_started_at" == "$war_process_started_at" ]]; then
+        osascript -e 'tell application id "tech.oaix.War" to quit' >/dev/null 2>&1 || true
+        sleep 2
+        kill "$war_pid" >/dev/null 2>&1 || true
+        wait "$war_pid" >/dev/null 2>&1 || true
+      fi
+    fi
+    if [[ -n "$fs_usage_pid" ]]; then
+      kill "$fs_usage_pid" >/dev/null 2>&1 || true
+      wait "$fs_usage_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$execsnoop_pid" ]]; then
+      kill "$execsnoop_pid" >/dev/null 2>&1 || true
+      wait "$execsnoop_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$execsnoop_sanitizer_pid" ]]; then
+      kill "$execsnoop_sanitizer_pid" >/dev/null 2>&1 || true
+      wait "$execsnoop_sanitizer_pid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$execsnoop_fifo"
+    if [[ -n "$nettop_pid" ]]; then
+      kill "$nettop_pid" >/dev/null 2>&1 || true
+      wait "$nettop_pid" >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup_audit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  sudo -v
+  if pgrep -x war >/dev/null 2>&1; then
+    echo "Quit every existing war process before starting the audit." >&2
+    exit 1
+  fi
+  rm -f "$audit_stop_file" "$owned_pids_file" "$unowned_war_file"
+  sudo fs_usage -w -f network -t "$collector_duration" \
+    >"$evidence_dir/${run_id}-network-fs-usage.log" 2>&1 &
+  fs_usage_pid=$!
+  rm -f "$execsnoop_fifo"
+  mkfifo "$execsnoop_fifo"
+  awk 'NR == 1 { print "UID PID PPID"; next } { print $1, $2, $3 }' \
+    <"$execsnoop_fifo" >"$execsnoop_output_file" &
+  execsnoop_sanitizer_pid=$!
+  sudo execsnoop -e >"$execsnoop_fifo" 2>"$execsnoop_error_file" &
+  execsnoop_pid=$!
+  sudo nettop -L "$collector_duration" -s 1 -n -x \
+    >"$evidence_dir/${run_id}-network-nettop.csv" 2>&1 &
+  nettop_pid=$!
+  sleep 1
+  if ! kill -0 "$fs_usage_pid" >/dev/null 2>&1 \
+    || ! kill -0 "$execsnoop_pid" >/dev/null 2>&1 \
+    || ! kill -0 "$nettop_pid" >/dev/null 2>&1; then
+    echo "A network collector exited before War launched." >&2
+    exit 1
+  fi
+
+  open -na "$app_path"
+  local launch_wait=0
+  while [[ -z "$war_pid" ]]; do
+    local candidate_pid
+    for candidate_pid in $(pgrep -x war || true); do
+      if [[ "$(ps -p "$candidate_pid" -o command= 2>/dev/null)" == "$app_executable"* ]]; then
+        war_pid="$candidate_pid"
+        break
+      fi
+    done
+    if [[ -n "$war_pid" ]]; then
+      break
+    fi
+    sleep 0.1
+    launch_wait=$((launch_wait + 1))
+    if (( launch_wait >= 100 )); then
+      echo "Timed out waiting for LaunchServices to start War." >&2
+      exit 1
+    fi
+  done
+  audited_war_pid="$war_pid"
+  war_process_started_at="$(ps -p "$war_pid" -o lstart=)"
+  sample_process_network &
+  sampling_pid=$!
+  ps -p "$war_pid" -o pid=,ppid=,lstart=,comm= \
+    >"$evidence_dir/${run_id}-network-war-identity.log"
+
+  local elapsed=0
+  while (( elapsed < audit_duration )); do
+    if ! kill -0 "$war_pid" >/dev/null 2>&1; then
+      echo "War exited before the active network audit completed." >&2
+      exit 1
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  osascript -e 'tell application id "tech.oaix.War" to quit'
+  local shutdown_elapsed=0
+  while kill -0 "$war_pid" >/dev/null 2>&1 && (( shutdown_elapsed < 10 )); do
+    sleep 1
+    shutdown_elapsed=$((shutdown_elapsed + 1))
+  done
+  if kill -0 "$war_pid" >/dev/null 2>&1; then
+    echo "War did not exit through the normal application quit path." >&2
+    exit 1
+  fi
+  touch "$audit_stop_file"
+  wait "$sampling_pid"
+  sampling_pid=""
+  wait "$war_pid" >/dev/null 2>&1 || true
+  war_pid=""
+
+  local surviving_process_id
+  for surviving_process_id in $(<"$owned_pids_file"); do
+    if kill -0 "$surviving_process_id" >/dev/null 2>&1; then
+      echo "A process from the launched War tree survived application shutdown: $surviving_process_id" >&2
+      exit 1
+    fi
+  done
+
+  local fs_usage_status=0
+  local nettop_status=0
+  if ! kill -0 "$execsnoop_pid" >/dev/null 2>&1; then
+    echo "The process-ancestry collector exited before the audit completed." >&2
+    exit 1
+  fi
+  kill "$execsnoop_pid" >/dev/null 2>&1 || true
+  wait "$execsnoop_pid" >/dev/null 2>&1 || true
+  execsnoop_pid=""
+  wait "$execsnoop_sanitizer_pid"
+  execsnoop_sanitizer_pid=""
+  rm "$execsnoop_fifo"
+  wait "$fs_usage_pid" || fs_usage_status=$?
+  fs_usage_pid=""
+  wait "$nettop_pid" || nettop_status=$?
+  nettop_pid=""
+  if [[ "$fs_usage_status" -ne 0 || "$nettop_status" -ne 0 ]]; then
+    echo "Network collector failed: fs_usage=$fs_usage_status nettop=$nettop_status" >&2
+    exit 1
+  fi
+  cleanup_audit
+  trap - EXIT INT TERM
+
+  if [[ ! -s "$evidence_dir/${run_id}-network-samples.log" \
+    || ! -s "$execsnoop_output_file" \
+    || ! -s "$evidence_dir/${run_id}-network-fs-usage.log" \
+    || ! -s "$evidence_dir/${run_id}-network-nettop.csv" ]]; then
+    echo "Network audit evidence is incomplete." >&2
+    exit 1
+  fi
+  if grep -Eqi 'dtrace:.*(failed|error)|operation not permitted' "$execsnoop_error_file"; then
+    echo "The process-ancestry collector reported an error." >&2
+    exit 1
+  fi
+  if ! grep -Eq "^[[:space:]]*[0-9]+[[:space:]]+$audited_war_pid[[:space:]]+[0-9]+[[:space:]]*$" \
+    "$execsnoop_output_file"; then
+    echo "The process-ancestry collector did not observe the launched War PID." >&2
+    exit 1
+  fi
+  if [[ -s "$unowned_war_file" ]]; then
+    echo "A war process outside the launched bundle process tree appeared during the audit." >&2
+    exit 1
+  fi
+  if grep -Fq ':9282 (LISTEN)' "$evidence_dir/${run_id}-network-samples.log"; then
+    echo "A process listened on inherited port 9282 during the audit." >&2
+    exit 1
+  fi
+  echo "Network evidence is complete in $evidence_dir; manual review is still required before M2 can pass."
+}
+
+case "$command_name" in
+  preflight) preflight ;;
+  quality-gates) quality_gates ;;
+  build) build_bundle ;;
+  integration) integration ;;
+  checklist) write_checklist ;;
+  sentinel-prepare) sentinel_prepare ;;
+  sentinel-verify) sentinel_verify ;;
+  sentinel-cleanup) sentinel_cleanup ;;
+  network-audit) network_audit ;;
+  all)
+    preflight
+    quality_gates
+    build_bundle
+    integration
+    write_checklist
+    ;;
+  *)
+    echo "Unknown command: $command_name" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
