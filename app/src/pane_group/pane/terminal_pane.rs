@@ -520,7 +520,7 @@ impl PaneContent for TerminalPane {
                 is_active,
                 is_read_only: view.model.lock().is_read_only(),
                 shell_launch_data: view.shell_launch_data_if_local(app),
-                input_config: Some(current_input_config),
+                input_config: None,
                 llm_model_override: None,
                 active_profile_id: None,
                 conversation_ids_to_restore: Vec::new(),

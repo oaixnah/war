@@ -229,6 +229,82 @@ fn local_app_production_closure_constructs_and_renders_a_fresh_terminal() {
 }
 
 #[test]
+fn local_app_snapshot_round_trips_through_local_persistence() {
+    let tempdir = tempfile::tempdir().expect("temporary persistence directory should be created");
+    persistence::with_test_app_database_file_path(tempdir.path().join("war.sqlite"), || {
+        App::test(ASSETS, |mut app| async move {
+            app.add_singleton_model(|ctx| AppExecutionMode::new(ExecutionMode::App, false, ctx));
+            let (public_preferences, startup_toml_parse_error) =
+                settings::init_public_user_preferences();
+            let private_preferences = settings::init_private_user_preferences();
+            app.add_singleton_model(move |_| {
+                ::settings::PublicPreferences::new(public_preferences)
+            });
+            app.add_singleton_model(move |_| private_preferences);
+            #[cfg(feature = "local_tty")]
+            app.add_singleton_model(|_| PtySpawner::new_for_test());
+
+            let initial_app_state = app.update(|ctx| {
+                initialize_local_app(IntervalTimer::new(), startup_toml_parse_error, ctx)
+            });
+            let global_resource_handles =
+                app.read(|ctx| GlobalResourceHandlesProvider::as_ref(ctx).get().clone());
+            let (window_id, _) =
+                app.add_window(warpui::platform::WindowStyle::NotStealFocus, |ctx| {
+                    root_view::RootView::new(
+                        global_resource_handles,
+                        root_view::NewWorkspaceSource::Empty {
+                            previous_active_window: None,
+                            shell: None,
+                        },
+                        ctx,
+                    )
+                });
+            let workspace = app
+                .views_of_type::<Workspace>(window_id)
+                .expect("local workspace lookup should succeed")
+                .into_iter()
+                .next()
+                .expect("local window should contain a workspace");
+            let snapshot = workspace.read(&app, |workspace, ctx| {
+                workspace.snapshot(window_id, false, ctx)
+            });
+            assert!(snapshot.is_local_terminal_only());
+
+            app.update(|ctx| {
+                ctx.dispatch_global_action("workspace:save_app", &());
+                PersistenceWriter::handle(ctx).update(ctx, |writer, _| writer.terminate());
+            });
+
+            let (persisted_data, writer_handles) = app.update(|ctx| {
+                persistence::initialize(
+                    ctx,
+                    persistence::PersistenceScope::App,
+                    persistence::PersistedDataScope::LocalApp,
+                )
+            });
+            let restored_state = persisted_data
+                .expect("local persisted data should load")
+                .app_state
+                .expect("local app state should restore");
+            assert_eq!(restored_state.windows.len(), 1);
+            assert_eq!(restored_state.windows[0], snapshot);
+
+            let writer_handles = writer_handles.expect("restored local writer should start");
+            writer_handles
+                .sender
+                .send(persistence::ModelEvent::Terminate)
+                .expect("restored local writer should terminate");
+            writer_handles
+                .handle
+                .join()
+                .expect("restored local writer should join");
+            drop(initial_app_state);
+        });
+    });
+}
+
+#[test]
 fn local_app_preserves_corrupt_persistence_and_starts_fresh() {
     let tempdir = tempfile::tempdir().expect("temporary persistence directory should be created");
     let database_path = tempdir.path().join("war.sqlite");
